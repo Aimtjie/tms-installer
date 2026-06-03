@@ -1,0 +1,140 @@
+# Single-host docker-compose for the Ticket Management System.
+# Intended for local evaluation / development — see README "This compose stack
+# is not a production deployment" for why. Production uses the k8s/ overlays.
+#
+# Usage:
+#   cp .env.example .env       # then replace every CHANGE_ME / blank value
+#                              # (JWT_SECRET, BLIND_INDEX_SECRET, POSTGRES_PASSWORD,
+#                              # KEYCLOAK_ADMIN_PASSWORD at minimum)
+#   docker compose up -d --build
+#
+# Web UI:        http://localhost:${WEB_HTTP_PORT:-8081}
+# API:           http://localhost:${API_HTTP_PORT:-8080}
+# Keycloak:      http://localhost:${KEYCLOAK_HTTP_PORT:-8090}  (admin / ${KEYCLOAK_ADMIN_PASSWORD})
+#
+# Default login (Development seed only): admin@tms.local / Admin@1234
+
+name: tms
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ticketdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.5.6@sha256:8d44614c74798322c4e07fbe0ecb15cfbb5879d69b484628555f58ade06f0d8c
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - start-dev
+      - --import-realm
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloakdb
+      KC_DB_USERNAME: ${POSTGRES_USER:-postgres}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required — set it in .env}
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./ticket-management-system.AppHost/Realms:/opt/keycloak/data/import:ro
+    ports:
+      - "127.0.0.1:${KEYCLOAK_HTTP_PORT:-8090}:8080"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  apiservice:
+    image: ghcr.io/aimtjie/tms-api:latest
+    build:
+      context: .
+      dockerfile: ticket-management-system.ApiService/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
+      Keycloak__BaseUrl: http://keycloak:8080
+      Keycloak__PublicBaseUrl: ${KEYCLOAK_PUBLIC_BASE_URL:-http://localhost:8090}
+      Keycloak__Realm: tms
+      Keycloak__ClientId: tms-api
+      Keycloak__AdminUsername: ${KEYCLOAK_ADMIN_USER:-admin}
+      Keycloak__AdminPassword: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required — set it in .env}
+      Jwt__Secret: ${JWT_SECRET:?JWT_SECRET is required — set it in .env (openssl rand -base64 48)}
+      Jwt__Issuer: tms-api
+      Jwt__Audience: tms-web
+      Jwt__ExpiryMinutes: "15"
+      Jwt__RefreshTokenExpiryDays: "7"
+      Encryption__BlindIndexSecret: ${BLIND_INDEX_SECRET:?BLIND_INDEX_SECRET is required — set it in .env (openssl rand -base64 48)}
+      Tickets__NumberPrefix: ${TICKET_NUMBER_PREFIX:-SS}
+      Cors__WebOrigin: ${WEB_PUBLIC_BASE_URL:-http://localhost:8081}
+      Sso__WebRedirectBaseUrl: ${WEB_PUBLIC_BASE_URL:-http://localhost:8081}
+      Migrations__AutoReconcileSquash: "true"
+      BWS_ACCESS_TOKEN: ${BWS_ACCESS_TOKEN:-}
+      BWS_ORGANIZATION_ID: ${BWS_ORGANIZATION_ID:-}
+    ports:
+      - "127.0.0.1:${API_HTTP_PORT:-8080}:8080"
+    tmpfs:
+      - /Logs
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  web:
+    image: ghcr.io/aimtjie/tms-web:latest
+    build:
+      context: .
+      dockerfile: ticket-management-system.Web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      apiservice:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
+      services__apiservice__http__0: http://apiservice:8080
+      ApiService__BaseUrl: ${API_PUBLIC_BASE_URL:-http://localhost:8080}
+    ports:
+      - "127.0.0.1:${WEB_HTTP_PORT:-8081}:8080"
+    tmpfs:
+      - /Logs
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  postgres_data:
+  keycloak_data:

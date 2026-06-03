@@ -1,0 +1,54 @@
+{
+  "realm": "tms",
+  "enabled": true,
+  "displayName": "Ticket Management System",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "bruteForceProtected": true,
+  "clients": [
+    {
+      "clientId": "tms-api",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "tms-sso",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "placeholder-overwritten-by-api-at-startup",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:*/api/auth/sso/callback",
+        "https://localhost:*/api/auth/sso/callback",
+        "https://tms.plasid.tech/api/auth/sso/callback"
+      ],
+      "webOrigins": ["+"]
+    }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "Customer",           "composite": false },
+      { "name": "Agent",              "composite": false },
+      { "name": "Admin",              "composite": false },
+      { "name": "SuperAdmin",         "composite": false },
+      { "name": "Director",           "composite": false },
+      { "name": "SDM",                "composite": false },
+      { "name": "TeamLead",           "composite": false },
+      { "name": "ServiceCoordinator", "composite": false },
+      { "name": "SupportEngineer",    "composite": false },
+      { "name": "HelpdeskAgent",      "composite": false }
+    ]
+  }
+}
