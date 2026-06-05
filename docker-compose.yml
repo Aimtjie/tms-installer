@@ -13,6 +13,10 @@
 # Keycloak:      http://localhost:${KEYCLOAK_HTTP_PORT:-8090}  (admin / ${KEYCLOAK_ADMIN_PASSWORD})
 #
 # Default login (Development seed only): admin@tms.local / Admin@1234
+#
+# Database files are stored in Docker-managed named volumes (see `volumes:` at
+# the bottom). They survive `docker compose down` and `docker compose up` cycles.
+# Wipe everything (DB + Keycloak users + realm state) with: `docker compose down -v`.
 
 name: tms
 
@@ -22,18 +26,27 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # :? causes `docker compose up` to fail immediately if this is unset/empty,
+      # before any service initialises persistent state with a bad password.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}
+      # Both ticketdb and keycloakdb are created on first boot via the init script
+      # below — Postgres' POSTGRES_DB only supports a single database.
       POSTGRES_DB: postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
+      # Check ticketdb specifically (not just postgres) so downstream services
+      # wait until the /docker-entrypoint-initdb.d init script has created it.
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ticketdb"]
       interval: 5s
       timeout: 5s
       retries: 20
 
   keycloak:
+    # Pinned to the same 26.5.6 digest used by Aspire AppHost.cs — version drift
+    # between local-compose and the prod realm has caused real bugs (#370).
+    # Verify on bump: `docker buildx imagetools inspect quay.io/keycloak/keycloak:<tag>`.
     image: quay.io/keycloak/keycloak:26.5.6@sha256:8d44614c74798322c4e07fbe0ecb15cfbb5879d69b484628555f58ade06f0d8c
     restart: unless-stopped
     depends_on:
@@ -57,8 +70,14 @@ services:
       - keycloak_data:/opt/keycloak/data
       - ./ticket-management-system.AppHost/Realms:/opt/keycloak/data/import:ro
     ports:
+      # Bound to 127.0.0.1 so the admin console is not reachable over the network
+      # by default. Remove the 127.0.0.1: prefix if you need remote access (use a
+      # reverse proxy with TLS instead for anything beyond local evaluation).
       - "127.0.0.1:${KEYCLOAK_HTTP_PORT:-8090}:8080"
     healthcheck:
+      # Keycloak 26 exposes /health/ready on the management port (9000) when
+      # KC_HEALTH_ENABLED=true. The image has no curl/wget, but does ship bash —
+      # so we open a TCP socket via bash's /dev/tcp builtin and look for "UP".
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
       interval: 10s
       timeout: 5s
@@ -66,6 +85,9 @@ services:
       start_period: 60s
 
   apiservice:
+    # Pre-built image from GHCR (public — no login required).
+    # `docker compose up` pulls this automatically.
+    # `docker compose up --build` rebuilds from source (requires the full repo).
     image: ghcr.io/aimtjie/tms-api:latest
     build:
       context: .
@@ -77,10 +99,18 @@ services:
       keycloak:
         condition: service_healthy
     environment:
+      # This stack is built around Development mode: the dev seeder provisions
+      # both the Keycloak user AND the matching TMS Users row needed by LoginAsync,
+      # the EF migration history reconciler runs, and the non-Dev fail-fast guards
+      # (Keycloak:PublicBaseUrl, Cors:WebOrigin, Sso:WebRedirectBaseUrl) are relaxed.
+      # Production-mode deployment isn't supported on this compose path — use k8s/.
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
       Keycloak__BaseUrl: http://keycloak:8080
+      # Public-facing Keycloak URL — rendered into per-tenant SSO setup instructions
+      # (ClientDetail.razor "Microsoft Entra Redirect URI"). The API fail-fast guard
+      # at Program.cs:288 requires this when ASPNETCORE_ENVIRONMENT != Development.
       Keycloak__PublicBaseUrl: ${KEYCLOAK_PUBLIC_BASE_URL:-http://localhost:8090}
       Keycloak__Realm: tms
       Keycloak__ClientId: tms-api
@@ -96,13 +126,21 @@ services:
       Cors__WebOrigin: ${WEB_PUBLIC_BASE_URL:-http://localhost:8081}
       Sso__WebRedirectBaseUrl: ${WEB_PUBLIC_BASE_URL:-http://localhost:8081}
       Migrations__AutoReconcileSquash: "true"
+      # Optional: if BWS_ACCESS_TOKEN + BWS_ORGANIZATION_ID are set in .env, the
+      # Bitwarden Secrets Manager provider takes precedence over the values above.
       BWS_ACCESS_TOKEN: ${BWS_ACCESS_TOKEN:-}
       BWS_ORGANIZATION_ID: ${BWS_ORGANIZATION_ID:-}
     ports:
       - "127.0.0.1:${API_HTTP_PORT:-8080}:8080"
+    # /Logs is where the Serilog Development file sink writes (../Logs/ from /app).
+    # tmpfs keeps it memory-backed and ephemeral — no host path needed.
     tmpfs:
       - /Logs
     healthcheck:
+      # The aspnet runtime image ships neither curl nor wget, so we probe via
+      # bash's /dev/tcp builtin. `head -1` keeps just the HTTP status line; a
+      # 200 means the /health checks all passed (ASP.NET Core returns 503 with
+      # body "Unhealthy" otherwise).
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
       interval: 10s
       timeout: 5s
@@ -110,6 +148,7 @@ services:
       start_period: 60s
 
   web:
+    # Pre-built image from GHCR (public — no login required).
     image: ghcr.io/aimtjie/tms-web:latest
     build:
       context: .
@@ -121,14 +160,19 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_URLS: http://+:8080
+      # Same Postgres — Web only reads/writes the DataProtectionKeys table.
       ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
+      # Server-side (Blazor Server / SignalR) — pod-to-pod via the Docker network.
       services__apiservice__http__0: http://apiservice:8080
+      # Browser-facing — returned to the WASM client via /bff/api-config. Must be
+      # an origin the user's browser can resolve, hence host port, not service name.
       ApiService__BaseUrl: ${API_PUBLIC_BASE_URL:-http://localhost:8080}
     ports:
       - "127.0.0.1:${WEB_HTTP_PORT:-8081}:8080"
     tmpfs:
       - /Logs
     healthcheck:
+      # See apiservice healthcheck for rationale.
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
       interval: 10s
       timeout: 5s
@@ -136,5 +180,17 @@ services:
       start_period: 60s
 
 volumes:
+  # Docker prefixes managed volume names with the compose project name
+  # (`name: tms` at the top of this file), so the final names visible to
+  # `docker volume ls` are `tms_postgres_data` and `tms_keycloak_data`.
+  # Stored under /var/lib/docker/volumes/ on the host.
+  # To use a bind mount instead (DB files visible in your working dir),
+  # replace the empty driver block with:
+  #   postgres_data:
+  #     driver: local
+  #     driver_opts:
+  #       type: none
+  #       device: ${PWD}/data/postgres
+  #       o: bind
   postgres_data:
   keycloak_data:

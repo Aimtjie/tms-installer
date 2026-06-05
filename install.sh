@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Ticket Management System — one-shot local installer.
 #
-# Pulls the four files compose needs (compose file, .env template, postgres
-# init script, Keycloak realm) from GitHub raw and brings the stack up using
-# the pre-built GHCR images. No git clone, no .NET SDK, no build.
+# Pulls the files compose needs (compose files, .env template, postgres init
+# script, Keycloak realm) from GitHub raw and brings the stack up using the
+# pre-built GHCR images. No git clone, no .NET SDK, no build.
+#
+# External Postgres: set PG_HOST in .env before running and the bundled
+# postgres container is automatically replaced with your external instance.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Aimtjie/tms-installer/main/install.sh | bash
 #
@@ -38,7 +41,7 @@ if ! docker info >/dev/null 2>&1; then
      or re-run this script with sudo."
 fi
 
-# ── 2. Fetch the four files compose needs ──────────────────────────────────
+# ── 2. Fetch the files compose needs ──────────────────────────────────────
 log "Target directory: $TMS_DIR"
 mkdir -p "$TMS_DIR/scripts/postgres-init" "$TMS_DIR/ticket-management-system.AppHost/Realms"
 cd "$TMS_DIR"
@@ -58,6 +61,7 @@ fetch() {
 }
 
 fetch docker-compose.yml
+fetch docker-compose.external-pg.yml
 fetch .env.example
 fetch scripts/postgres-init/01-create-databases.sh
 fetch ticket-management-system.AppHost/Realms/tms-realm.json
@@ -103,10 +107,17 @@ GENERATED_KEYCLOAK_PW=""
 for key in JWT_SECRET BLIND_INDEX_SECRET POSTGRES_PASSWORD KEYCLOAK_ADMIN_PASSWORD; do
     value=""
     if grep -qE "^${key}=(CHANGE_ME|)[[:space:]]*$" .env; then
+        # Line present but placeholder/blank — replace in place. Sed pattern
+        # is narrowed to the same placeholder/blank shape so a user who
+        # left `KEY=CHANGE_ME` at the top AND added `KEY=real_override`
+        # at the bottom doesn't lose the override. (#697 C11)
         value=$(generate_secret "$key")
         SED_ARGS+=(-e "s|^${key}=(CHANGE_ME)?[[:space:]]*\$|${key}=${value}|")
         REPAIRED+=("$key")
     elif ! grep -qE "^${key}=" .env; then
+        # Key missing entirely (truncated / user-written .env) — append it.
+        # Without this, the stack would fail later via compose's :? guard
+        # after the slow image pull rather than fast here. (#697 C10)
         value=$(generate_secret "$key")
         APPEND_LINES+=("${key}=${value}")
         REPAIRED+=("$key")
@@ -116,6 +127,10 @@ done
 
 if [[ ${#REPAIRED[@]} -gt 0 ]]; then
     log "Repaired/added required secrets: ${REPAIRED[*]}"
+    # Write via .env.tmp + mv so an interrupted run never leaves a
+    # half-substituted .env behind. `|` as sed delimiter dodges base64's /+.
+    # Subshell umask keeps .env.tmp at 0600 from the moment `>` creates it,
+    # closing the transient world-readable window. (#697 C12)
     (
         umask 077
         if [[ ${#SED_ARGS[@]} -gt 0 ]]; then
@@ -133,20 +148,45 @@ else
     log ".env has real values for all required secrets — no repair needed"
 fi
 
+# Safety net: belt-and-suspenders against the repair regex failing somehow
+# (e.g. a malformed line that grep matched but sed couldn't substitute).
 if grep -qE '^(JWT_SECRET|BLIND_INDEX_SECRET|POSTGRES_PASSWORD|KEYCLOAK_ADMIN_PASSWORD)=(CHANGE_ME|)[[:space:]]*$' .env; then
     die ".env still contains unset/placeholder values for required secrets after repair pass. Edit .env manually before bringing the stack up."
 fi
 
 # ── 4. Bring the stack up ──────────────────────────────────────────────────
+# Detect external-pg mode: if PG_HOST is set to a non-empty value in .env,
+# activate the overlay that disables the bundled postgres container.
+# COMPOSE_ARGS is a bash array so paths with spaces in $TMS_DIR are handled
+# correctly. A separate COMPOSE_DISPLAY string is built for the copy-pasteable
+# management commands printed in the footer.
+COMPOSE_ARGS=(-f "$TMS_DIR/docker-compose.yml")
+# tail -n1: last PG_HOST line wins (handles accidental duplicates in .env).
+# sed strips inline comments (e.g. PG_HOST=myhost # note → myhost).
+pg_host=$(grep -E "^PG_HOST=" .env 2>/dev/null | tail -n1 | cut -d= -f2- | sed 's/[[:space:]]*#.*//' | tr -d '[:space:]' || true)
+if [[ -n "$pg_host" ]]; then
+    log "External Postgres detected (PG_HOST=$pg_host) — using docker-compose.external-pg.yml overlay"
+    COMPOSE_ARGS+=(-f "$TMS_DIR/docker-compose.external-pg.yml")
+fi
+
+# Pre-quoted display string for the footer — readable and copy-pasteable even
+# when $TMS_DIR contains spaces.
+COMPOSE_DISPLAY="-f \"$TMS_DIR/docker-compose.yml\""
+[[ -n "$pg_host" ]] && COMPOSE_DISPLAY="$COMPOSE_DISPLAY -f \"$TMS_DIR/docker-compose.external-pg.yml\""
+
 log "Pulling images from GHCR"
-docker compose pull --quiet
+docker compose "${COMPOSE_ARGS[@]}" pull --quiet
 
 log "Starting stack (postgres, keycloak, apiservice, web)"
-docker compose up -d
+docker compose "${COMPOSE_ARGS[@]}" up -d
 
 # ── 5. Done — print next steps ─────────────────────────────────────────────
+# Read host-port overrides from .env so the printed URLs match what compose
+# actually published. Defaults mirror the `${VAR:-NNNN}` fallbacks in docker-compose.yml.
 read_env_port() {
     local key="$1" default="$2" val
+    # `|| true` so a missing key (grep exit 1 + pipefail) doesn't trip set -e
+    # under shells that have `shopt -s inherit_errexit` enabled.
     val=$(grep -E "^${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)
     printf '%s' "${val:-$default}"
 }
@@ -165,10 +205,10 @@ cat <<EOF
 
   Login (dev seed):  admin@tms.local  /  Admin@1234
 
-  Logs:     docker compose --project-directory "$TMS_DIR" logs -f
-  Status:   docker compose --project-directory "$TMS_DIR" ps
-  Stop:     docker compose --project-directory "$TMS_DIR" down
-  Wipe:     docker compose --project-directory "$TMS_DIR" down -v   (drops DB)
+  Logs:     docker compose $COMPOSE_DISPLAY logs -f
+  Status:   docker compose $COMPOSE_DISPLAY ps
+  Stop:     docker compose $COMPOSE_DISPLAY down
+  Wipe:     docker compose $COMPOSE_DISPLAY down -v   (drops DB)
 
   PWA offline demo: open the Web UI once on this machine to prime the
   service-worker cache, then stop the stack or disconnect the network and
@@ -177,6 +217,9 @@ cat <<EOF
 EOF
 
 if [[ -n "${GENERATED_KEYCLOAK_PW:-}" && -t 1 ]]; then
+    # Only echo the freshly-generated admin password when stdout is a TTY —
+    # the value is persisted in .env regardless, and printing it would leak
+    # the credential into CI logs / shell transcripts when piped to a file.
     cat <<EOF
 
   Generated Keycloak admin password (stored in $TMS_DIR/.env):

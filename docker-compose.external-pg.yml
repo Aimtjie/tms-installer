@@ -1,0 +1,48 @@
+# External Postgres overlay for the Ticket Management System.
+#
+# Use this overlay when you have an existing Postgres instance (cloud-managed,
+# self-hosted, etc.) and do not want the bundled postgres container.
+# Both databases — ticketdb and keycloakdb — must already exist on the server.
+# You can create them by running scripts/postgres-init/01-create-databases.sh
+# against your instance, or manually:
+#   CREATE DATABASE ticketdb;
+#   CREATE DATABASE keycloakdb;
+#
+# Credentials: set POSTGRES_USER and POSTGRES_PASSWORD in .env to your external
+# postgres credentials. The bundled postgres container is disabled by this overlay,
+# so those vars are reused as the connection credentials throughout.
+#
+# ── Manual usage ──────────────────────────────────────────────────────────────
+# 1. Add to .env (or export as env vars):
+#      PG_HOST=your-postgres-host
+#      PG_PORT=5432          # optional, defaults to 5432
+#    Update POSTGRES_USER and POSTGRES_PASSWORD to match your external instance.
+# 2. docker compose -f docker-compose.yml -f docker-compose.external-pg.yml up -d
+#
+# ── install.sh auto-detection ─────────────────────────────────────────────────
+# install.sh automatically activates this overlay when PG_HOST is set in .env.
+# Set PG_HOST before running install.sh and it will switch to external-pg mode.
+#
+# ── How the disable works ─────────────────────────────────────────────────────
+# The postgres service is tagged with the never-active profile [_disabled].
+# Docker Compose silently drops depends_on references to any service whose
+# profile is not active, so keycloak and apiservice start without waiting for
+# a local postgres container.
+
+services:
+  postgres:
+    profiles: [_disabled]
+
+  keycloak:
+    environment:
+      KC_DB_URL: "jdbc:postgresql://${PG_HOST:?PG_HOST must be set in .env for external-pg mode}:${PG_PORT:-5432}/keycloakdb"
+      KC_DB_USERNAME: "${POSTGRES_USER:-postgres}"
+      KC_DB_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
+
+  apiservice:
+    environment:
+      ConnectionStrings__ticketdb: "Host=${PG_HOST:?PG_HOST must be set in .env for external-pg mode};Port=${PG_PORT:-5432};Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+
+  web:
+    environment:
+      ConnectionStrings__ticketdb: "Host=${PG_HOST:?PG_HOST must be set in .env for external-pg mode};Port=${PG_PORT:-5432};Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
