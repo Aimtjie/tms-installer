@@ -13,8 +13,10 @@
 # Or with a custom target directory:
 #   curl -fsSL .../install.sh | TMS_DIR=/opt/tms bash
 #
-# Re-running is safe: existing .env values are preserved, existing files are
-# not overwritten, and `docker compose up -d` is idempotent.
+# Re-running is safe and doubles as the upgrade path: managed files (compose
+# files, init script, realm) are refreshed to the latest published versions —
+# a locally modified copy is kept beside the new one as *.bak — while existing
+# .env values are always preserved, and `docker compose up -d` is idempotent.
 
 set -euo pipefail
 
@@ -46,18 +48,37 @@ log "Target directory: $TMS_DIR"
 mkdir -p "$TMS_DIR/scripts/postgres-init" "$TMS_DIR/ticket-management-system.AppHost/Realms"
 cd "$TMS_DIR"
 
+# Managed files are refreshed so a re-run upgrades an old install — otherwise the
+# footer's instructions (BIND_ADDRESS, DEMO_SEEDER_ENABLED, …) silently do nothing
+# against a kept pre-upgrade docker-compose.yml. Download to .tmp and rename so a
+# mid-flight Ctrl-C leaves nothing at the real path. If the download fails but an
+# existing copy is present, keep it and continue (so an offline / rate-limited
+# re-run can still apply .env changes and restart) — only a missing file with a
+# failed download is fatal. The FIRST time a file is replaced by a differing
+# version its previous contents are preserved as $path.bak; an existing .bak is
+# never overwritten, so a user's original customization survives across upgrades.
+# .env is user state, handled separately below — never overwritten.
 fetch() {
     local path="$1"
-    # -s (non-empty) instead of -f (exists) so a zero-byte file from a prior
-    # interrupted run is not silently "kept". Download to .tmp and rename so a
-    # mid-flight Ctrl-C leaves nothing at the real path for the next run.
-    if [[ -s "$path" ]]; then
-        log "  keeping existing $path"
-    else
-        log "  downloading $path"
-        curl -fsSL "$REPO_RAW/$path" -o "$path.tmp"
-        mv "$path.tmp" "$path"
+    if ! curl -fsSL "$REPO_RAW/$path" -o "$path.tmp" 2>/dev/null; then
+        rm -f "$path.tmp"
+        if [[ -s "$path" ]]; then
+            warn "  could not download $path — keeping existing copy"
+            return 0
+        fi
+        die "could not download $path and no existing copy is present. Check your network connection and re-run."
     fi
+    if [[ -s "$path" ]] && ! cmp -s "$path" "$path.tmp"; then
+        if [[ -e "$path.bak" ]]; then
+            log "  updating $path (existing $path.bak preserved)"
+        else
+            log "  updating $path (previous copy kept as $path.bak)"
+            cp "$path" "$path.bak"
+        fi
+    elif [[ ! -s "$path" ]]; then
+        log "  downloading $path"
+    fi
+    mv "$path.tmp" "$path"
 }
 
 fetch docker-compose.yml
@@ -203,7 +224,15 @@ cat <<EOF
   API          http://localhost:$API_PORT
   Keycloak     http://localhost:$KC_PORT
 
-  Login (dev seed):  admin@tms.local  /  Admin@1234
+  First run: open the Web UI — it redirects to the /setup wizard where you
+  create your admin account. (Prefer demo data + demo logins instead? Set
+  DEMO_SEEDER_ENABLED=true in $TMS_DIR/.env and re-run docker compose up -d
+  BEFORE completing /setup.)
+
+  LAN access: set BIND_ADDRESS=0.0.0.0 and point the *_PUBLIC_BASE_URL
+  variables in $TMS_DIR/.env at this machine's LAN IP, then re-run
+  docker compose up -d. Details (firewall, caveats): see the "LAN access"
+  section in .env.example or the README.
 
   Logs:     docker compose $COMPOSE_DISPLAY logs -f
   Status:   docker compose $COMPOSE_DISPLAY ps

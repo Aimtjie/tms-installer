@@ -12,7 +12,13 @@
 # API:           http://localhost:${API_HTTP_PORT:-8080}
 # Keycloak:      http://localhost:${KEYCLOAK_HTTP_PORT:-8090}  (admin / ${KEYCLOAK_ADMIN_PASSWORD})
 #
-# Default login (Development seed only): admin@tms.local / Admin@1234
+# Services bind to 127.0.0.1 by default (not reachable from other machines).
+# For LAN access set BIND_ADDRESS=0.0.0.0 and the *_PUBLIC_BASE_URL variables
+# in .env — see the "LAN access" section in .env.example.
+#
+# First run: open the Web UI — it redirects to the /setup wizard to create your
+# admin account. (Demo logins only exist when DEMO_SEEDER_ENABLED=true in .env:
+# admin@tms.local / Admin@1234.)
 #
 # Database files are stored in Docker-managed named volumes (see `volumes:` at
 # the bottom). They survive `docker compose down` and `docker compose up` cycles.
@@ -36,9 +42,16 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      # Check ticketdb specifically (not just postgres) so downstream services
-      # wait until the /docker-entrypoint-initdb.d init script has created it.
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ticketdb"]
+      # Wait until the /docker-entrypoint-initdb.d init script has actually created
+      # both databases: connecting to ticketdb proves it exists, and the pg_database
+      # row proves keycloakdb does. (pg_isready only pings the server — it reported
+      # healthy even when the init script had failed and neither database existed,
+      # letting keycloak crash-loop on "keycloakdb does not exist" with postgres
+      # shown green.) -h forces TCP so the check can't pass against the socket-only
+      # temporary server the entrypoint runs during first-boot init; PGPASSWORD is
+      # a no-op on the default trust config but keeps the check working if local
+      # auth is hardened via POSTGRES_INITDB_ARGS. $$ defers to container env.
+      test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRES_PASSWORD psql -h 127.0.0.1 -U $${POSTGRES_USER:-postgres} -d ticketdb -tAc \"SELECT 1 FROM pg_database WHERE datname='keycloakdb'\" | grep -q 1"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -70,10 +83,12 @@ services:
       - keycloak_data:/opt/keycloak/data
       - ./ticket-management-system.AppHost/Realms:/opt/keycloak/data/import:ro
     ports:
-      # Bound to 127.0.0.1 so the admin console is not reachable over the network
-      # by default. Remove the 127.0.0.1: prefix if you need remote access (use a
-      # reverse proxy with TLS instead for anything beyond local evaluation).
-      - "127.0.0.1:${KEYCLOAK_HTTP_PORT:-8090}:8080"
+      # Deliberately NOT governed by BIND_ADDRESS: the app never needs browser →
+      # Keycloak traffic (login is Direct Grant proxied by the API), so the admin
+      # console stays loopback-only even when the app is exposed on the LAN. Set
+      # KEYCLOAK_BIND_ADDRESS=0.0.0.0 only for Entra SSO redirects or remote
+      # console access — see the LAN access section in .env.example.
+      - "${KEYCLOAK_BIND_ADDRESS:-127.0.0.1}:${KEYCLOAK_HTTP_PORT:-8090}:8080"
     healthcheck:
       # Keycloak 26 exposes /health/ready on the management port (9000) when
       # KC_HEALTH_ENABLED=true. The image has no curl/wget, but does ship bash —
@@ -99,12 +114,19 @@ services:
       keycloak:
         condition: service_healthy
     environment:
-      # This stack is built around Development mode: the dev seeder provisions
-      # both the Keycloak user AND the matching TMS Users row needed by LoginAsync,
-      # the EF migration history reconciler runs, and the non-Dev fail-fast guards
-      # (Keycloak:PublicBaseUrl, Cors:WebOrigin, Sso:WebRedirectBaseUrl) are relaxed.
-      # Production-mode deployment isn't supported on this compose path — use k8s/.
-      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      # Production mode by default (#1084): reference data (roles, permissions, lookup
+      # tables, Keycloak realm roles) seeds in every environment, and the first-run
+      # /setup wizard creates your admin account — no hardcoded demo credentials.
+      # Set DEMO_SEEDER_ENABLED=true in .env for demo tenants + logins
+      # (admin@tms.local / Admin@1234), or ASPNETCORE_ENVIRONMENT=Development for a
+      # dev-style stack (relaxed fail-fast guards, human-readable console logs).
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      # This stack is plain HTTP end-to-end (no TLS terminator), so HTTPS-only Secure
+      # cookies would 500 the /setup first-run (see SecurityConfig). Set
+      # REQUIRE_HTTPS=true only when a TLS-terminating reverse proxy fronts the stack
+      # (recommended for anything beyond evaluation).
+      Security__RequireHttps: ${REQUIRE_HTTPS:-false}
+      DemoSeeder__Enabled: ${DEMO_SEEDER_ENABLED:-false}
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
       Keycloak__BaseUrl: http://keycloak:8080
@@ -123,15 +145,28 @@ services:
       Jwt__RefreshTokenExpiryDays: "7"
       Encryption__BlindIndexSecret: ${BLIND_INDEX_SECRET:?BLIND_INDEX_SECRET is required — set it in .env (openssl rand -base64 48)}
       Tickets__NumberPrefix: ${TICKET_NUMBER_PREFIX:-SS}
-      Cors__WebOrigin: ${WEB_PUBLIC_BASE_URL:-http://localhost:8081}
+      # Loopback origins are appended so browsing from the host itself (localhost
+      # or 127.0.0.1) keeps working in Production mode even after WEB_PUBLIC_BASE_URL
+      # is repointed at a LAN IP — Production CORS and the /setup origin check are
+      # exact-match, unlike Development which always allowed loopback. The appended
+      # origins track WEB_HTTP_PORT so a custom web port stays reachable from the host.
+      Cors__WebOrigin: "${WEB_PUBLIC_BASE_URL:-http://localhost:8081},http://localhost:${WEB_HTTP_PORT:-8081},http://127.0.0.1:${WEB_HTTP_PORT:-8081}"
       Sso__WebRedirectBaseUrl: ${WEB_PUBLIC_BASE_URL:-http://localhost:8081}
+      # No reverse proxy in this stack: trust forwarded headers from loopback only.
+      # Without this, Production mode would trust all RFC1918 peers (TrustedProxies
+      # #997 default for in-cluster proxies), letting LAN clients spoof
+      # X-Forwarded-For and bypass the per-IP login rate limiter (#608). If you add
+      # a TLS proxy, set TRUSTED_PROXY_CIDR to where its traffic enters the app
+      # container (the Docker network CIDR for an in-network proxy, not its public
+      # address) — see the TRUSTED_PROXY_CIDR notes in .env.example.
+      RateLimiting__TrustedProxyCidrs__0: ${TRUSTED_PROXY_CIDR:-127.0.0.1/32}
       Migrations__AutoReconcileSquash: "true"
       # Optional: if BWS_ACCESS_TOKEN + BWS_ORGANIZATION_ID are set in .env, the
       # Bitwarden Secrets Manager provider takes precedence over the values above.
       BWS_ACCESS_TOKEN: ${BWS_ACCESS_TOKEN:-}
       BWS_ORGANIZATION_ID: ${BWS_ORGANIZATION_ID:-}
     ports:
-      - "127.0.0.1:${API_HTTP_PORT:-8080}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${API_HTTP_PORT:-8080}:8080"
     # /Logs is where the Serilog Development file sink writes (../Logs/ from /app).
     # tmpfs keeps it memory-backed and ephemeral — no host path needed.
     tmpfs:
@@ -158,7 +193,15 @@ services:
       apiservice:
         condition: service_healthy
     environment:
-      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      # Same plain-HTTP posture as apiservice — see the comment there.
+      Security__RequireHttps: ${REQUIRE_HTTPS:-false}
+      # appsettings.json ships the plasid.tech Cloudflare Web Analytics token (#1010),
+      # which non-Development mode would now render for every install — blank it so
+      # self-hosted stacks don't report page views to the upstream project's zone.
+      CloudflareAnalytics__Token: ${CLOUDFLARE_ANALYTICS_TOKEN:-}
+      # Same loopback-only forwarded-header trust as apiservice (no proxy here).
+      RateLimiting__TrustedProxyCidrs__0: ${TRUSTED_PROXY_CIDR:-127.0.0.1/32}
       ASPNETCORE_URLS: http://+:8080
       # Same Postgres — Web only reads/writes the DataProtectionKeys table.
       ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
@@ -168,7 +211,7 @@ services:
       # an origin the user's browser can resolve, hence host port, not service name.
       ApiService__BaseUrl: ${API_PUBLIC_BASE_URL:-http://localhost:8080}
     ports:
-      - "127.0.0.1:${WEB_HTTP_PORT:-8081}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${WEB_HTTP_PORT:-8081}:8080"
     tmpfs:
       - /Logs
     healthcheck:
