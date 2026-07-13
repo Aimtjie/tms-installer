@@ -6,7 +6,11 @@
 #   cp .env.example .env       # then replace every CHANGE_ME / blank value
 #                              # (JWT_SECRET, BLIND_INDEX_SECRET, POSTGRES_PASSWORD,
 #                              # KEYCLOAK_ADMIN_PASSWORD at minimum)
-#   docker compose up -d --build
+#   docker compose up -d       # pulls the pre-built GHCR images
+#
+# `--build` rebuilds only the API from source; the web image is always pulled from
+# GHCR (its in-repo Dockerfile is a packaging step needing a pre-published dir — see
+# the web service below and README "from source"). #1093
 #
 # Web UI:        http://localhost:${WEB_HTTP_PORT:-8081}
 # API:           http://localhost:${API_HTTP_PORT:-8080}
@@ -102,7 +106,7 @@ services:
   apiservice:
     # Pre-built image from GHCR (public — no login required).
     # `docker compose up` pulls this automatically.
-    # `docker compose up --build` rebuilds from source (requires the full repo).
+    # `docker compose up --build` rebuilds the API from source (requires the full repo).
     image: ghcr.io/aimtjie/tms-api:latest
     build:
       context: .
@@ -183,11 +187,13 @@ services:
       start_period: 60s
 
   web:
-    # Pre-built image from GHCR (public — no login required).
+    # GHCR-only image (public — no login required). Unlike apiservice there is no `build:`:
+    # ticket-management-system.Web/Dockerfile is a packaging Dockerfile that expects an
+    # already-published directory — the blazor.web.js targeting-pack gotcha forces `dotnet
+    # publish` OUTSIDE Docker (see CLAUDE.md "Static Web Assets"), and an in-Docker build
+    # would silently ship a broken WASM UI. Build web from source via the two-step in
+    # README ("from source"), not `docker compose --build`. #1093
     image: ghcr.io/aimtjie/tms-web:latest
-    build:
-      context: .
-      dockerfile: ticket-management-system.Web/Dockerfile
     restart: unless-stopped
     depends_on:
       apiservice:
@@ -196,9 +202,9 @@ services:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       # Same plain-HTTP posture as apiservice — see the comment there.
       Security__RequireHttps: ${REQUIRE_HTTPS:-false}
-      # appsettings.json ships the plasid.tech Cloudflare Web Analytics token (#1010),
-      # which non-Development mode would now render for every install — blank it so
-      # self-hosted stacks don't report page views to the upstream project's zone.
+      # Cloudflare Web Analytics is opt-in (#1095): the image no longer ships a token, so
+      # self-hosted stacks report nothing by default. Set CLOUDFLARE_ANALYTICS_TOKEN in .env
+      # to send page views to YOUR OWN Cloudflare zone.
       CloudflareAnalytics__Token: ${CLOUDFLARE_ANALYTICS_TOKEN:-}
       # Same loopback-only forwarded-header trust as apiservice (no proxy here).
       RateLimiting__TrustedProxyCidrs__0: ${TRUSTED_PROXY_CIDR:-127.0.0.1/32}
