@@ -30,6 +30,268 @@ log()  { printf '\033[1;34m[tms]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[tms]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[tms]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# ── Interactive first-run configuration helpers ─────────────────────────────
+# Prompts read from $PROMPT_FD, which defaults to the controlling terminal.
+# This matters because the documented `curl … | bash` install pipes the SCRIPT
+# into bash's stdin — a bare `read` would consume the script text, not the
+# user's keystrokes. Reading from /dev/tty (opened on demand by ensure_prompt_fd)
+# reaches the keyboard instead. Tests set PROMPT_FD to a pipe to drive answers.
+# When no terminal is available, or TMS_NONINTERACTIVE is set, prompting is
+# skipped entirely and the .env template defaults + generated secrets stand.
+PROMPT_FD="${PROMPT_FD:-}"
+
+# Open /dev/tty on a spare descriptor the first time it's needed. Returns
+# non-zero when prompting isn't possible (headless, piped with no tty, or
+# explicitly disabled) so callers can fall back to non-interactive behaviour.
+ensure_prompt_fd() {
+    [[ -n "$PROMPT_FD" ]] && return 0
+    [[ -z "${TMS_NONINTERACTIVE:-}" && -r /dev/tty ]] || return 1
+    exec {PROMPT_FD}</dev/tty
+}
+
+# ask VAR "Prompt" ["default"] — free-text; empty input takes the default.
+# Prompt text goes to stderr (still the terminal under `curl | bash`, where only
+# stdin is the pipe), so it's visible even when stdout is redirected to a file.
+ask() {
+    local __var="$1" __prompt="$2" __default="${3:-}" __ans
+    if [[ -n "$__default" ]]; then
+        printf '%s [%s]: ' "$__prompt" "$__default" >&2
+    else
+        printf '%s: ' "$__prompt" >&2
+    fi
+    IFS= read -r -u "$PROMPT_FD" __ans || __ans=""
+    printf -v "$__var" '%s' "${__ans:-$__default}"
+}
+
+# ask_yes_no VAR "Prompt" [default(y|n)] — normalises the answer to yes/no.
+ask_yes_no() {
+    local __var="$1" __prompt="$2" __default="${3:-n}" __ans __hint
+    case "$__default" in [yY]*) __hint="Y/n" ;; *) __hint="y/N" ;; esac
+    while true; do
+        printf '%s [%s]: ' "$__prompt" "$__hint" >&2
+        IFS= read -r -u "$PROMPT_FD" __ans || __ans=""
+        case "${__ans:-$__default}" in
+            [yY]|[yY][eE][sS]) printf -v "$__var" 'yes'; return 0 ;;
+            [nN]|[nN][oO])     printf -v "$__var" 'no';  return 0 ;;
+            *) printf '  Please answer y or n.\n' >&2 ;;
+        esac
+    done
+}
+
+# ask_port VAR "Prompt" default — validates 1..65535.
+ask_port() {
+    local __var="$1" __prompt="$2" __default="$3" __ans
+    while true; do
+        printf '%s [%s]: ' "$__prompt" "$__default" >&2
+        IFS= read -r -u "$PROMPT_FD" __ans || __ans=""
+        __ans="${__ans:-$__default}"
+        if [[ "$__ans" =~ ^[0-9]+$ ]] && (( __ans >= 1 && __ans <= 65535 )); then
+            printf -v "$__var" '%s' "$__ans"; return 0
+        fi
+        printf '  Enter a port between 1 and 65535.\n' >&2
+    done
+}
+
+# Best-effort primary LAN IPv4, used only as the default for LAN mode (the user
+# confirms/overrides it). `ip route get` yields the source address actually used
+# to reach off-box — never docker0; hostname -I is the fallback. Empty if none.
+detect_lan_ip() {
+    local ip=""
+    if command -v ip >/dev/null 2>&1; then
+        ip=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oE 'src [0-9.]+' | awk '{print $2}' | head -n1 || true)
+    fi
+    if [[ -z "$ip" ]] && command -v hostname >/dev/null 2>&1; then
+        ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+(\.[0-9]+){3}$' | grep -vE '^127\.' | head -n1 || true)
+    fi
+    printf '%s' "$ip"
+}
+
+# url_host "https://host:port/path" → "host"
+url_host() { local u="${1#*://}"; u="${u%%/*}"; u="${u%%:*}"; printf '%s' "$u"; }
+
+# set_env_var KEY VALUE — replace the first active KEY= line in .env (or append
+# if none), atomically, preserving mode 0600. awk carries VALUE literally, so
+# URLs, CIDRs and base64 survive without sed metacharacter pitfalls. Commented
+# template lines (#KEY=…) don't match, so a fresh active line is appended.
+set_env_var() {
+    local key="$1" value="$2" tmp
+    tmp=$(mktemp "${TMS_DIR}/.env.XXXXXX")
+    if grep -qE "^${key}=" .env; then
+        awk -v k="$key" -v v="$value" 'BEGIN{done=0}
+            !done && index($0, k "=") == 1 { print k "=" v; done=1; next }
+            { print }' .env > "$tmp"
+    else
+        cat .env > "$tmp"
+        printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    fi
+    chmod 600 "$tmp"
+    mv "$tmp" .env
+}
+
+# Write a ready-to-edit nginx reverse-proxy config next to .env. nginx's own
+# $variables are backslash-escaped so bash leaves them literal; ${web_host} etc.
+# ARE interpolated. Pairs with REQUIRE_HTTPS=true + TRUSTED_PROXY_CIDR in .env.
+write_nginx_sample() {
+    local web_url="$1" api_url="$2" web_port="$3" api_port="$4"
+    local out="${TMS_DIR}/nginx.tms.conf.example" web_host api_host
+    web_host=$(url_host "$web_url"); api_host=$(url_host "$api_url")
+    cat > "$out" <<NGINX
+# Sample nginx reverse-proxy for TMS — generated by install.sh.
+# TLS-terminate here and forward to the loopback-published app ports. Edit the
+# server_name / ssl_certificate paths, then: nginx -t && systemctl reload nginx.
+#
+# Pair with .env: REQUIRE_HTTPS=true, and (proxy on this host) BIND_ADDRESS
+# stays 127.0.0.1 with TRUSTED_PROXY_CIDR=127.0.0.1/32. The app infers HTTPS and
+# the real client IP from the X-Forwarded-* headers below — keep them.
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${web_host};
+
+    ssl_certificate     /etc/ssl/certs/${web_host}.pem;      # <- your fullchain
+    ssl_certificate_key /etc/ssl/private/${web_host}.key;    # <- your private key
+
+    # Web UI (Blazor Server + SignalR websockets on first load)
+    location / {
+        proxy_pass http://127.0.0.1:${web_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade           \$http_upgrade;
+        proxy_set_header Connection        "upgrade";
+        proxy_read_timeout 100s;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${api_host};
+
+    ssl_certificate     /etc/ssl/certs/${api_host}.pem;
+    ssl_certificate_key /etc/ssl/private/${api_host}.key;
+
+    # API — the browser calls this directly (its CORS origin is the Web URL above)
+    location / {
+        proxy_pass http://127.0.0.1:${api_port};
+        proxy_http_version 1.1;
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Real-IP         \$remote_addr;
+        proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+
+# HTTP → HTTPS redirect
+server {
+    listen 80;
+    server_name ${web_host} ${api_host};
+    return 301 https://\$host\$request_uri;
+}
+NGINX
+    chmod 644 "$out"
+}
+
+# Interactive first-run configuration. Only invoked on a freshly created .env,
+# and returns immediately (leaving template defaults in place) when no terminal
+# is available or TMS_NONINTERACTIVE is set. Writes chosen values into .env via
+# set_env_var BEFORE the secret-repair pass, so an external-Postgres password
+# the operator supplies is preserved rather than auto-generated over.
+prompt_config() {
+    if ! ensure_prompt_fd; then
+        log "Non-interactive install — keeping .env defaults. Edit ${TMS_DIR}/.env (Postgres/ports/LAN/proxy) or re-run in a terminal to configure."
+        return 0
+    fi
+
+    local pg_external pg_host pg_port pg_user pg_pass
+    local web_port api_port kc_port
+    local mode detected ip
+    local web_url api_url proxy_local trusted
+
+    log "First-run setup — press Enter to accept each [default]. (Ctrl-C to abort.)"
+
+    # ── Postgres: bundled container vs external server ──
+    ask_yes_no pg_external "Use an EXTERNAL PostgreSQL server (instead of the bundled container)?" n
+    if [[ "$pg_external" == yes ]]; then
+        ask pg_host "  External Postgres host (or IP)" ""
+        while [[ -z "$pg_host" ]]; do
+            warn "  A host is required for external Postgres."
+            ask pg_host "  External Postgres host (or IP)" ""
+        done
+        ask_port pg_port "  External Postgres port" 5432
+        ask pg_user "  Postgres username" "postgres"
+        ask pg_pass "  Postgres password (the EXISTING server credential)" ""
+        while [[ -z "$pg_pass" ]]; do
+            warn "  A password is required so the app can connect."
+            ask pg_pass "  Postgres password (the EXISTING server credential)" ""
+        done
+        set_env_var PG_HOST "$pg_host"
+        set_env_var PG_PORT "$pg_port"
+        set_env_var POSTGRES_USER "$pg_user"
+        set_env_var POSTGRES_PASSWORD "$pg_pass"
+        warn "  Ensure databases 'ticketdb' AND 'keycloakdb' already exist on ${pg_host} (see scripts/postgres-init/01-create-databases.sh)."
+    fi
+
+    # ── Host ports (asked before exposure so LAN/proxy URLs use them) ──
+    ask_port web_port "Web UI host port" 8081
+    ask_port api_port "API host port" 8080
+    ask_port kc_port  "Keycloak host port" 8090
+    [[ "$web_port" != 8081 ]] && set_env_var WEB_HTTP_PORT "$web_port"
+    [[ "$api_port" != 8080 ]] && set_env_var API_HTTP_PORT "$api_port"
+    [[ "$kc_port"  != 8090 ]] && set_env_var KEYCLOAK_HTTP_PORT "$kc_port"
+
+    # ── Exposure / access mode ──
+    printf '\n  How will you reach TMS from a browser?\n' >&2
+    printf '    1) This machine only  (localhost — default, most secure)\n' >&2
+    printf '    2) Other machines on your LAN  (plain HTTP)\n' >&2
+    printf '    3) Behind a TLS reverse proxy  (nginx / Caddy / Traefik, HTTPS)\n' >&2
+    ask mode "  Choose 1, 2 or 3" "1"
+
+    case "$mode" in
+        2)
+            detected=$(detect_lan_ip)
+            ask ip "  This host's LAN IP address" "$detected"
+            while [[ -z "$ip" ]]; do
+                warn "  A LAN IP (or hostname) is required for option 2."
+                ask ip "  This host's LAN IP address" "$detected"
+            done
+            set_env_var BIND_ADDRESS "0.0.0.0"
+            set_env_var WEB_PUBLIC_BASE_URL "http://${ip}:${web_port}"
+            set_env_var API_PUBLIC_BASE_URL "http://${ip}:${api_port}"
+            log "LAN mode: publishing on 0.0.0.0 — browse http://${ip}:${web_port} from other devices."
+            warn "Traffic is plain HTTP (LAN eval only); PWA/offline stays inactive over a bare IP."
+            warn "On a cloud VM, also open inbound TCP ${web_port} + ${api_port} in its security group."
+            ;;
+        3)
+            ask web_url "  Public Web URL (e.g. https://tickets.example.com)" ""
+            while [[ -z "$web_url" ]]; do warn "  Required."; ask web_url "  Public Web URL" ""; done
+            ask api_url "  Public API URL (e.g. https://api.example.com)" ""
+            while [[ -z "$api_url" ]]; do warn "  Required."; ask api_url "  Public API URL" ""; done
+            set_env_var WEB_PUBLIC_BASE_URL "$web_url"
+            set_env_var API_PUBLIC_BASE_URL "$api_url"
+            set_env_var REQUIRE_HTTPS "true"
+            ask_yes_no proxy_local "  Does the proxy run on THIS host (forwarding to localhost)?" y
+            if [[ "$proxy_local" == yes ]]; then
+                set_env_var TRUSTED_PROXY_CIDR "127.0.0.1/32"
+            else
+                set_env_var BIND_ADDRESS "0.0.0.0"
+                ask trusted "  CIDR the proxy connects FROM (Docker net e.g. 172.16.0.0/12, or proxy-host /32)" "172.16.0.0/12"
+                set_env_var TRUSTED_PROXY_CIDR "$trusted"
+            fi
+            write_nginx_sample "$web_url" "$api_url" "$web_port" "$api_port"
+            log "Reverse-proxy mode: REQUIRE_HTTPS=true. Sample nginx config → ${TMS_DIR}/nginx.tms.conf.example"
+            warn "The browser calls the API URL directly, so give it public DNS + a proxy server block too."
+            warn "Using Entra SSO? Also set KEYCLOAK_PUBLIC_BASE_URL + KEYCLOAK_BIND_ADDRESS in .env (Keycloak stays loopback by default)."
+            ;;
+        *)
+            log "Localhost mode: stack stays on 127.0.0.1 (browse http://localhost:${web_port} on this machine)."
+            ;;
+    esac
+}
+
 # ── 1. Prerequisites ───────────────────────────────────────────────────────
 command -v curl >/dev/null   || die "curl is required — install with: sudo apt-get install -y curl"
 command -v docker >/dev/null || die "docker is required — install with: sudo apt-get install -y docker.io docker-compose-v2"
@@ -97,16 +359,28 @@ chmod +x scripts/postgres-init/01-create-databases.sh
 #      random values. Everything else in .env is preserved verbatim: custom
 #      ports, public URLs, Bitwarden / GitHub-Secrets config, ticket-number
 #      prefix, ASPNETCORE_ENVIRONMENT, etc. (#696)
+FRESH_ENV=0
 if [[ ! -f .env ]]; then
     log "Creating .env from .env.example"
     # Subshell so the tight umask doesn't leak into later commands. cp
     # respects umask for the destination file, so .env lands at 0600
     # atomically — no transient world-readable window before chmod runs.
     (umask 077 && cp .env.example .env)
+    FRESH_ENV=1
 fi
 # Always enforce 0600 — covers the re-run case where someone has loosened
 # the file mode by hand. No-op on the freshly-cp'd path above.
 chmod 600 .env
+
+# First install only: offer interactive configuration of the settings that most
+# commonly need changing (Postgres bundled/external, host ports, and LAN /
+# reverse-proxy exposure). Re-runs preserve the existing .env, so prompting is
+# skipped there — matching the "existing .env values are always preserved"
+# contract above. Values chosen here are written BEFORE the secret-repair pass,
+# so a supplied external-Postgres password is kept rather than regenerated.
+if [[ "$FRESH_ENV" == 1 ]]; then
+    prompt_config
+fi
 
 # JWT + blind-index need the full 48-byte entropy; the two password fields
 # strip /+= so they round-trip cleanly through compose interpolation, env
@@ -195,6 +469,31 @@ fi
 COMPOSE_DISPLAY="-f \"$TMS_DIR/docker-compose.yml\""
 [[ -n "$pg_host" ]] && COMPOSE_DISPLAY="$COMPOSE_DISPLAY -f \"$TMS_DIR/docker-compose.external-pg.yml\""
 
+# Stale bundled-Postgres volume guard. Postgres only sets its password on the
+# FIRST init of its data volume; if we just generated a new POSTGRES_PASSWORD
+# but a bundled volume already exists (internal mode only), the app + Keycloak
+# fail auth against the old baked-in password ("password authentication failed
+# … 28P01" → Keycloak crash-loop). Catch it here, before the pull/up, rather
+# than let the operator debug a healthy-looking-but-broken stack. Only fires
+# when the script itself generated the password (a hand-set password is left
+# untouched, so this can't detect that case — a manual restore/wipe is needed).
+if [[ -z "$pg_host" && " ${REPAIRED[*]:-} " == *" POSTGRES_PASSWORD "* ]] \
+   && docker volume ls -q -f name=tms_postgres_data 2>/dev/null | grep -q .; then
+    warn "An existing bundled Postgres volume (tms_postgres_data) was found, but POSTGRES_PASSWORD was just (re)generated."
+    warn "Postgres keeps the password from its first init, so login + Keycloak will fail (28P01) until the volume is reset."
+    if ensure_prompt_fd; then
+        ask_yes_no wipe_vol "  Reset the DB volume now so the new password applies? (bundled DB data is lost)" n
+        if [[ "$wipe_vol" == yes ]]; then
+            docker compose "${COMPOSE_ARGS[@]}" down -v >/dev/null 2>&1 || docker volume rm tms_postgres_data >/dev/null 2>&1 || true
+            log "Removed tms_postgres_data — Postgres will re-initialise with the current password."
+        else
+            warn "Keeping it — run  docker compose ${COMPOSE_DISPLAY} down -v  to reset, or restore the previous POSTGRES_PASSWORD in .env."
+        fi
+    else
+        warn "Run  docker compose ${COMPOSE_DISPLAY} down -v  to reset the DB, or restore the previous POSTGRES_PASSWORD in .env."
+    fi
+fi
+
 log "Pulling images from GHCR"
 docker compose "${COMPOSE_ARGS[@]}" pull --quiet
 
@@ -204,35 +503,41 @@ docker compose "${COMPOSE_ARGS[@]}" up -d
 # ── 5. Done — print next steps ─────────────────────────────────────────────
 # Read host-port overrides from .env so the printed URLs match what compose
 # actually published. Defaults mirror the `${VAR:-NNNN}` fallbacks in docker-compose.yml.
-read_env_port() {
+read_env_value() {
     local key="$1" default="$2" val
     # `|| true` so a missing key (grep exit 1 + pipefail) doesn't trip set -e
-    # under shells that have `shopt -s inherit_errexit` enabled.
+    # under shells that have `shopt -s inherit_errexit` enabled. Values here
+    # (ports, URLs, IPs, CIDRs) carry no internal whitespace, so trimming is safe.
     val=$(grep -E "^${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '[:space:]' || true)
     printf '%s' "${val:-$default}"
 }
-WEB_PORT=$(read_env_port WEB_HTTP_PORT 8081)
-API_PORT=$(read_env_port API_HTTP_PORT 8080)
-KC_PORT=$(read_env_port KEYCLOAK_HTTP_PORT 8090)
+WEB_PORT=$(read_env_value WEB_HTTP_PORT 8081)
+API_PORT=$(read_env_value API_HTTP_PORT 8080)
+KC_PORT=$(read_env_value KEYCLOAK_HTTP_PORT 8090)
+# Public URLs the browser actually uses — reflect the chosen exposure mode so the
+# footer prints the right address (localhost / LAN IP / proxy hostname).
+WEB_PUBLIC=$(read_env_value WEB_PUBLIC_BASE_URL "http://localhost:$WEB_PORT")
+API_PUBLIC=$(read_env_value API_PUBLIC_BASE_URL "http://localhost:$API_PORT")
 
 cat <<EOF
 
 ──────────────────────────────────────────────────────────────────────────
   TMS is starting up. First boot takes ~60s for Keycloak to import the realm.
 
-  Web UI       http://localhost:$WEB_PORT
-  API          http://localhost:$API_PORT
-  Keycloak     http://localhost:$KC_PORT
+  Open in your browser   $WEB_PUBLIC
+  API (browser-facing)   $API_PUBLIC
+  Keycloak console       http://localhost:$KC_PORT   (stays loopback by default)
 
   First run: open the Web UI — it redirects to the /setup wizard where you
   create your admin account. (Prefer demo data + demo logins instead? Set
   DEMO_SEEDER_ENABLED=true in $TMS_DIR/.env and re-run docker compose up -d
   BEFORE completing /setup.)
 
-  LAN access: set BIND_ADDRESS=0.0.0.0 and point the *_PUBLIC_BASE_URL
-  variables in $TMS_DIR/.env at this machine's LAN IP, then re-run
-  docker compose up -d. Details (firewall, caveats): see the "LAN access"
-  section in .env.example or the README.
+  Change how it's reached (localhost / LAN / reverse proxy): edit BIND_ADDRESS,
+  the *_PUBLIC_BASE_URL variables, and REQUIRE_HTTPS in $TMS_DIR/.env, then
+  docker compose up -d. Details (firewall, caveats, nginx): see the "LAN access"
+  section in .env.example or the README. A fresh interactive install can set
+  these for you — run install.sh in a terminal.
 
   Logs:     docker compose $COMPOSE_DISPLAY logs -f
   Status:   docker compose $COMPOSE_DISPLAY ps
