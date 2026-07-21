@@ -1,0 +1,204 @@
+#!/bin/sh
+# tmsctl — operate a self-hosted TMS installation.
+#
+# The point of this script is that you should never need to run kubectl, docker
+# or psql by hand. If you find yourself doing so to accomplish something routine,
+# that is a gap worth reporting.
+#
+# Start with:  tmsctl status
+#
+# POSIX sh throughout. No bashisms, so it runs on whatever the server has.
+
+set -eu
+
+TMS_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+export TMS_ROOT
+
+TMS_ENV_FILE=${TMS_ENV_FILE:-$TMS_ROOT/.env}
+TMS_KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
+export TMS_ENV_FILE TMS_KUBECONFIG
+
+# shellcheck source=lib/common.sh
+. "$TMS_ROOT/lib/common.sh"
+
+TMS_TARGET=$(env_get TMS_TARGET k3s)
+TMS_NAMESPACE=$(env_get K8S_NAMESPACE tms)
+export TMS_TARGET TMS_NAMESPACE
+
+usage() {
+    cat <<'EOF'
+tmsctl — operate a self-hosted TMS installation
+
+  tmsctl status                      is everything healthy? start here
+  tmsctl logs <component> [-f]       api | web | auth | db | ingress
+  tmsctl backup now|list|verify      take, list or check backups
+  tmsctl restore <snapshot>          restore from a backup
+  tmsctl cert replace <crt> <key>    install a renewed certificate
+  tmsctl node list|drain|uncordon    server maintenance
+  tmsctl update --check|<tarball>    move to a new version
+  tmsctl secret export               re-write the encrypted secrets bundle
+  tmsctl support-bundle              collect diagnostics to send onward
+  tmsctl verify-recovery             prove a restore actually worked
+  tmsctl preflight [--ha]            check this machine is suitable
+  tmsctl install                     first-time setup
+  tmsctl join <token>                add this server to an existing cluster
+  tmsctl version
+
+Every command accepts --help.
+
+Operating procedures — a server failing, restoring, renewing the certificate —
+are in docs/RUNBOOK.md next to this script.
+EOF
+}
+
+# Load the implementation for whichever target is installed. Only k3s is
+# implemented here; the others report that plainly rather than half-working.
+case "$TMS_TARGET" in
+    k3s|k8s)
+        # shellcheck source=lib/k3s.sh
+        . "$TMS_ROOT/lib/k3s.sh"
+        ;;
+    compose|swarm)
+        unsupported() {
+            die "'$1' is not available for the $TMS_TARGET target yet.
+Implemented for k3s; compose and swarm adapters are tracked separately.
+For now use the docker commands documented in $TMS_ROOT/$TMS_TARGET/README.md."
+        }
+        for _cmd in target_status target_logs target_backup target_support_bundle \
+                    target_cert_replace target_node; do
+            eval "$_cmd() { unsupported \"\${TMS_SUBCOMMAND:-command}\"; }"
+        done
+        ;;
+    *)
+        die "Unknown TMS_TARGET '$TMS_TARGET' in $TMS_ENV_FILE. Expected: k3s k8s compose swarm"
+        ;;
+esac
+
+TMS_SUBCOMMAND=${1:-}
+export TMS_SUBCOMMAND
+[ $# -gt 0 ] && shift
+
+case "$TMS_SUBCOMMAND" in
+    status)
+        target_status
+        ;;
+
+    logs)
+        target_logs "$@"
+        ;;
+
+    backup)
+        target_backup "$@"
+        ;;
+
+    restore)
+        [ -n "${1:-}" ] || die "Usage: tmsctl restore <snapshot-id>   (list them with: tmsctl backup list)"
+        confirm_destructive "About to REPLACE all current data with snapshot $1.
+Anything created since that snapshot will be lost."
+        say ''
+        say 'Restore is a documented procedure rather than a single command, because'
+        say 'the order matters: secrets first, then the database, then verification.'
+        say 'Restoring the database without its matching encryption secrets leaves'
+        say 'the data unreadable.'
+        say ''
+        say "Follow docs/RUNBOOK.md section 6.3, using snapshot: $1"
+        ;;
+
+    cert)
+        [ "${1:-}" = replace ] || die "Usage: tmsctl cert replace <fullchain.pem> <privkey.pem>"
+        shift
+        target_cert_replace "$@"
+        ;;
+
+    node)
+        target_node "$@"
+        ;;
+
+    update)
+        case "${1:-}" in
+            --check)
+                say "Installed: $(target_version_short)"
+                say ''
+                say 'Compare against the latest release at:'
+                say '  https://github.com/Aimtjie/Ticket-Management-System/releases'
+                ;;
+            '')  die "Usage: tmsctl update --check | tmsctl update <tarball>" ;;
+            *)
+                [ -r "$1" ] || die "Cannot read $1"
+                say 'Updating is a documented procedure — see docs/UPGRADE.md.'
+                say 'It takes a fresh backup before changing anything, and rolls back'
+                say 'automatically if the new version does not come up healthy.'
+                ;;
+        esac
+        ;;
+
+    secret)
+        case "${1:-}" in
+            export)
+                say 'Re-writing the encrypted secrets bundle. Store it somewhere that is'
+                say 'NOT these servers — a bundle that dies with the cluster protects nothing.'
+                say ''
+                say 'See docs/RUNBOOK.md section 8.'
+                ;;
+            rotate)
+                case "${2:-}" in
+                    blind-index|BLIND_INDEX_SECRET)
+                        die "BLIND_INDEX_SECRET cannot be rotated.
+
+It derives the searchable index over encrypted fields. Changing it makes every
+existing user unfindable and login stops working, with no migration path — the
+only recovery is restoring a backup taken with the original value.
+
+This is refused deliberately rather than warned about."
+                        ;;
+                    *)  say 'See docs/RUNBOOK.md section 8 for what can be rotated and how.' ;;
+                esac
+                ;;
+            *)  die "Usage: tmsctl secret export | tmsctl secret rotate <name>" ;;
+        esac
+        ;;
+
+    support-bundle)
+        target_support_bundle
+        ;;
+
+    verify-recovery)
+        say 'Checking that the restored data is actually usable ...'
+        say ''
+        say 'This confirms the encryption keys match the data — a database restored'
+        say 'without its matching secrets looks fine until someone tries to log in.'
+        say ''
+        say 'See docs/RUNBOOK.md section 6.4.'
+        ;;
+
+    preflight)
+        exec "$TMS_ROOT/common/preflight.sh" "$@"
+        ;;
+
+    install)
+        case "$TMS_TARGET" in
+            k3s) exec "$TMS_ROOT/k3s/bootstrap.sh" "$@" ;;
+            *)   die "Install for the $TMS_TARGET target is documented in $TMS_ROOT/$TMS_TARGET/README.md" ;;
+        esac
+        ;;
+
+    join)
+        [ -n "${1:-}" ] || die "Usage: tmsctl join <token>   (printed by 'tmsctl install' on the first server)"
+        exec "$TMS_ROOT/k3s/bootstrap.sh" --join "$@"
+        ;;
+
+    version)
+        say "TMS $(target_version_short)"
+        say "target: $TMS_TARGET"
+        ;;
+
+    ''|-h|--help|help)
+        usage
+        ;;
+
+    *)
+        printf 'Unknown command: %s\n\n' "$TMS_SUBCOMMAND" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

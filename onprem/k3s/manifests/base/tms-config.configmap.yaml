@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tms-config
+  labels:
+    app: tms
+# Non-secret runtime configuration.
+#
+# Values written as __HOSTNAME__ are substituted at install time from TMS_HOSTNAME
+# in .env. Secrets (Jwt__Secret, ConnectionStrings__*, Keycloak admin credentials,
+# Encryption__BlindIndexSecret, Sso__Keycloak__ClientSecret) live in the tms-secrets
+# Secret, which bootstrap.sh generates and which is never committed.
+data:
+  ASPNETCORE_ENVIRONMENT: Production
+
+  # ── Single origin ────────────────────────────────────────────────
+  # Web, API and Keycloak all live under one hostname on different paths, so the
+  # browser never makes a cross-origin request. That removes CORS from the
+  # picture entirely and means one DNS record and one certificate.
+  #
+  #   https://__HOSTNAME__/        web
+  #   https://__HOSTNAME__/api/    API
+  #   https://__HOSTNAME__/auth/   Keycloak
+  #
+  # All three of these are enforced by fail-fast guards in the API outside
+  # Development — a blank or non-absolute value stops the pod at startup rather
+  # than failing later at login. Sso__WebRedirectBaseUrl must stay a SINGLE
+  # origin; a comma-separated list fails the absolute-URL guard.
+  Cors__WebOrigin: https://__HOSTNAME__
+  Sso__WebRedirectBaseUrl: https://__HOSTNAME__
+  Keycloak__PublicBaseUrl: https://__HOSTNAME__/auth
+
+  # In-cluster address the API uses to reach Keycloak directly (not via ingress).
+  #
+  # The /auth suffix is REQUIRED and must match KC_HTTP_RELATIVE_PATH in keycloak.yaml (#1217).
+  # These calls are server-to-server and never pass through the ingress, so nothing adds the prefix
+  # for them — without it every token exchange resolves to /realms/... which Keycloak 404s, and
+  # login is impossible. The failure is invisible to the probes: the management port is pinned to
+  # "/" separately, so Keycloak reports healthy throughout.
+  #
+  # #1178 made the API able to honour a prefix here; it does not make one appear. Pinned by
+  # OnPremManifestGuardTests.KeycloakBaseUrl_CarriesTheSamePathPrefixKeycloakIsServedUnder.
+  Keycloak__BaseUrl: http://keycloak:8080/auth
+  Keycloak__ClientId: tms-api
+  Keycloak__Realm: tms
+
+  # ── Tokens ───────────────────────────────────────────────────────
+  Jwt__Issuer: tms-api
+  Jwt__Audience: tms-web
+  Jwt__ExpiryMinutes: "15"
+  Jwt__RefreshTokenExpiryDays: "7"
+
+  # ── Attachments ──────────────────────────────────────────────────
+  # Local storage on a PVC. On a multi-server install this PVC must be backed by
+  # storage every node can reach — see ../../README.md. Anything other than the
+  # literal "S3" resolves to the local provider, which is why install validates
+  # this value rather than trusting it.
+  Storage__Provider: Local
+  Storage__Local__BasePath: /var/tms/attachments
+
+  # ── Proxy trust ──────────────────────────────────────────────────
+  # The k3s pod CIDR, so X-Forwarded-* from ingress-nginx is honoured and
+  # Request.IsHttps / HSTS / Secure cookies behave correctly behind TLS
+  # termination.
+  #
+  # This is deliberately explicit. Outside Development the default is to trust
+  # all RFC1918 ranges — but on this deployment the CLIENTS are themselves
+  # RFC1918 hosts, so that default would let any workstation on the LAN spoof
+  # X-Forwarded-For and defeat per-IP rate limiting. Note that setting this
+  # REPLACES the default rather than adding to it.
+  RateLimiting__TrustedProxyCidrs__0: 10.42.0.0/16
+
+  # ── Behaviour ────────────────────────────────────────────────────
+  Tickets__NumberPrefix: SS
+  Regions__Default: ZA
+
+  # First administrator is created through the /setup wizard on first visit.
+  # There are no seeded accounts.
+  DemoSeeder__Enabled: "false"
+
+  # 160 MB. Must stay >= Import:MaxFileSizeBytes + Import:MaxArchiveBytes: a
+  # manifest CSV and its companion ZIP share a single multipart body, so a lower
+  # value truncates imports rather than rejecting them cleanly.
+  Kestrel__Limits__MaxRequestBodySize: "167772160"
+
+  # Deliberately empty. The upstream default embeds an analytics token for a
+  # domain the client does not own, which would send their traffic data
+  # somewhere unexpected.
+  CloudflareAnalytics__Token: ""

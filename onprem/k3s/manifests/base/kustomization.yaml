@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base for the on-prem k3s target.
+#
+# Self-contained on purpose: this does NOT inherit k8s/base. That tree is tuned
+# for the maintainer's own clusters (MetalLB, Longhorn, Harbor, sealed secrets, a
+# fixed namespace) and evolves with them. A client install must not break because
+# a development cluster changed, and vice versa.
+#
+# Do not add any of the following here — every one of them is an assumption a
+# client's environment may not satisfy:
+#   MetalLB · Longhorn · Harbor · sealed secrets · a hard cert-manager dependency
+#   · a hardcoded StorageClass · a hardcoded namespace · any internal IP,
+#   hostname or tunnel identifier.
+
+namespace: tms
+
+resources:
+  - tms-config.configmap.yaml
+  - postgres.cluster.yaml
+  - api.yaml
+  - web.yaml
+  - keycloak.yaml
+  - redis.yaml
+  - ingress.yaml
+  - backup.cronjob.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: tms
+
+# Image versions are pinned to immutable digests by the release tarball, not by
+# tags. A tag means a pod restarted eight months from now quietly pulls whatever
+# main has become; a digest means the installation is reproducible between
+# operator-initiated updates.
+images:
+  - name: ghcr.io/aimtjie/tms-api
+    newTag: latest
+  - name: ghcr.io/aimtjie/tms-web
+    newTag: latest

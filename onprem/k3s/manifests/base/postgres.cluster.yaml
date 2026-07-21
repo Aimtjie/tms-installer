@@ -1,0 +1,98 @@
+---
+# PostgreSQL, managed by the CloudNativePG operator.
+#
+# CNPG is the reason this deployment target runs Kubernetes at all: it is the
+# only component in the stack that promotes a standby automatically when the
+# primary's node dies. Everything else here could run on Docker Compose.
+#
+# Replication happens at the PostgreSQL layer onto each node's own disk, so this
+# needs NO distributed storage. `local-path` — built into k3s — is the correct
+# choice. Putting a replicated block store (Longhorn, Ceph) underneath would
+# replicate the same bytes twice and add a failure mode the operator cannot
+# diagnose without help.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: tms-postgres
+spec:
+  # Patched per stage: 1 for a single server, 3 for HA.
+  #
+  # NEVER 2. With two instances and synchronous replication there is nobody left
+  # to acknowledge writes when one node goes down, so the primary stops accepting
+  # them — strictly worse than a single instance, which at least keeps serving.
+  instances: 1
+
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.6
+
+  # Unsupervised: CNPG performs switchovers and rolling updates without waiting
+  # for a human. That is the point of the exercise — there is nobody to wait for.
+  primaryUpdateStrategy: unsupervised
+
+  # Carried forward from the 2026-05-16 power-loss incident: give a recovering
+  # instance time to finish its own startup before CNPG judges it unhealthy and
+  # begins a switchover it does not need.
+  startDelay: 60
+  stopDelay: 60
+  switchoverDelay: 60
+
+  storage:
+    size: 10Gi
+    storageClass: local-path
+
+  # A separate volume for the write-ahead log. On a single disk the WAL competes
+  # with etcd's fsyncs, which is the classic way to make a small cluster feel
+  # slow without anything actually failing.
+  walStorage:
+    size: 4Gi
+    storageClass: local-path
+
+  bootstrap:
+    initdb:
+      database: ticketdb
+      owner: tms
+      secret:
+        name: tms-postgres-app
+      # Keycloak keeps its own schema in its own database on the same instance.
+      postInitSQL:
+        - CREATE DATABASE keycloakdb OWNER tms
+
+  postgresql:
+    # TLS-only. Per the project rule that any new deployment target adopts the
+    # PostgreSQL TLS pattern, there is deliberately no plain `host` line — a
+    # client that cannot negotiate TLS is refused rather than downgraded.
+    #
+    # CNPG issues the server certificate and publishes the CA as the
+    # `tms-postgres-ca` Secret, so there is nothing for the operator to mint or
+    # renew. Application connection strings carry
+    # `Ssl Mode=VerifyFull;Root Certificate=/etc/postgres-tls/ca.crt`.
+    pg_hba:
+      - hostssl all all all scram-sha-256
+      - hostssl replication all all scram-sha-256
+
+    parameters:
+      # Sized for a 4 GB node. Raise if the servers are grown; CNPG applies
+      # changes with a rolling restart.
+      shared_buffers: 256MB
+      effective_cache_size: 768MB
+      max_connections: "120"
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+---
+# Credentials for the application role. bootstrap.sh replaces the password with
+# a generated value before applying; it is never committed with a real secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tms-postgres-app
+  labels:
+    app: tms
+type: kubernetes.io/basic-auth
+stringData:
+  username: tms
+  password: __POSTGRES_PASSWORD__

@@ -1,0 +1,241 @@
+---
+# Nightly backup: the whole database, plus attachments when they are on a local
+# volume, pushed off this machine with restic.
+#
+# Why a logical dump rather than continuous archiving. Point-in-time recovery
+# needs somewhere to stream write-ahead logs to, and the only object storage
+# available here would be running on one of these same servers. If that server
+# died, archiving would fail, the log would grow unbounded on the primary, and a
+# survivable node loss would turn into a disk-full outage on the database. That
+# is a worse failure than a 24-hour recovery point, and one nobody would see
+# coming. PITR stays a documented upgrade for sites that want it.
+#
+# What is NOT in here: the secrets. The database contains a key ring that wraps
+# every tenant's encryption key, but the secrets that unlock THAT are held in the
+# escrow bundle the installer made you store off-site. Keeping them apart means
+# whoever holds the backup repository cannot read the data in it. The cost is
+# that a restore needs both halves — which is stated plainly at the top of the
+# restore procedure rather than left to be discovered.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tms-backup
+  labels:
+    app: tms-backup
+spec:
+  schedule: "0 2 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  # A backup that has not finished in four hours is stuck, not slow.
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    metadata:
+      labels:
+        app: tms-backup
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 14400
+      template:
+        metadata:
+          labels:
+            app: tms-backup
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1654
+            runAsGroup: 1654
+            fsGroup: 1654
+            seccompProfile:
+              type: RuntimeDefault
+          volumes:
+            - name: work
+              emptyDir:
+                sizeLimit: 4Gi
+            - name: postgres-ca
+              secret:
+                secretName: tms-postgres-ca
+                defaultMode: 0444
+                items:
+                  - key: ca.crt
+                    path: ca.crt
+            # Present so attachments stored on a local volume are captured. When
+            # attachments live in the database this mount is simply redundant.
+            - name: attachments
+              persistentVolumeClaim:
+                claimName: tms-attachments
+                readOnly: true
+
+          # Dump first, in an image that already has the PostgreSQL tools — the
+          # same one the database itself runs, so nothing extra is pulled.
+          initContainers:
+            - name: dump
+              image: ghcr.io/cloudnative-pg/postgresql:17.6
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              env:
+                - name: PGHOST
+                  value: tms-postgres-rw
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: tms-postgres-app
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: tms-postgres-app
+                      key: password
+                # Matches the database's TLS-only pg_hba. Without these the dump
+                # is refused rather than silently downgraded.
+                - name: PGSSLMODE
+                  value: verify-full
+                - name: PGSSLROOTCERT
+                  value: /etc/postgres-tls/ca.crt
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  ts=$(date -u +%Y%m%dT%H%M%SZ)
+                  echo "Dumping all databases at ${ts}"
+                  # pg_dumpall covers ticketdb AND keycloakdb, so the sign-in
+                  # configuration and every user travel with the data. It also
+                  # carries the DataProtection key ring, which is what makes the
+                  # tenant data readable again after a restore.
+                  pg_dumpall --clean --if-exists --no-password \
+                    | gzip -9 > /work/pgdump_${ts}.sql.gz
+                  echo "Wrote $(du -h /work/pgdump_${ts}.sql.gz | cut -f1)"
+                  # Fail loudly on a truncated dump. A zero-length file would
+                  # otherwise be pushed and counted as a successful backup.
+                  test -s /work/pgdump_${ts}.sql.gz
+                  gzip -t /work/pgdump_${ts}.sql.gz
+                  echo "Dump verified"
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                - name: postgres-ca
+                  mountPath: /etc/postgres-tls
+                  readOnly: true
+
+          containers:
+            - name: push
+              image: restic/restic:0.17.3
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              envFrom:
+                - secretRef:
+                    name: tms-backup-credentials
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  : "${RESTIC_REPOSITORY:?not set — see common/CONFIG.md}"
+                  : "${RESTIC_PASSWORD:?not set — see common/CONFIG.md}"
+
+                  # First run initialises the repository; later runs find it
+                  # already there. Any OTHER failure must stop the job rather
+                  # than be swallowed.
+                  if ! restic cat config >/dev/null 2>&1; then
+                    echo "Initialising backup repository"
+                    restic init
+                  fi
+
+                  echo "Backing up"
+                  restic backup --host tms --tag nightly /work /attachments
+
+                  echo "Applying retention"
+                  restic forget --host tms --prune \
+                    --keep-daily   "${KEEP_DAILY:-14}" \
+                    --keep-weekly  "${KEEP_WEEKLY:-4}" \
+                    --keep-monthly "${KEEP_MONTHLY:-6}"
+
+                  # Cheap structural check every night. The full read-everything
+                  # verification is a separate weekly job.
+                  restic check
+                  echo "Backup complete"
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                  readOnly: true
+                - name: attachments
+                  mountPath: /attachments
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+---
+# Weekly deep verification. `restic check --read-data` re-reads every byte in the
+# repository and proves the backups are actually restorable, as opposed to merely
+# present. Separate from the nightly job because it is slow and its failure means
+# something different — the backups are broken, not that tonight's failed.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tms-backup-verify
+  labels:
+    app: tms-backup-verify
+spec:
+  schedule: "0 5 * * 0"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4
+  failedJobsHistoryLimit: 4
+  jobTemplate:
+    metadata:
+      labels:
+        app: tms-backup-verify
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 21600
+      template:
+        metadata:
+          labels:
+            app: tms-backup-verify
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1654
+            runAsGroup: 1654
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: verify
+              image: restic/restic:0.17.3
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              envFrom:
+                - secretRef:
+                    name: tms-backup-credentials
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  echo "Re-reading the entire backup repository"
+                  restic check --read-data
+                  echo "All backups verified readable"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi

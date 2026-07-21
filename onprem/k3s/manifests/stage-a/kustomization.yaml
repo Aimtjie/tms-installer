@@ -1,0 +1,69 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Stage A — single server, no high availability.
+#
+# This is what a demo and a small production install both look like. One replica
+# of everything, one database instance, attachments on a local volume.
+#
+# It is deliberately the SAME manifests as Stage B with different numbers, so
+# moving to three servers is a configuration change rather than a reinstall.
+#
+# Sized against a 4 CPU / 4 GB / 15 GB server: roughly 1 GB of pods on top of
+# ~1.2 GB for the operating system, k3s and containerd.
+
+namespace: tms
+
+resources:
+  - ../base
+
+patches:
+  # Single replica of each stateless tier.
+  #
+  # Also the only currently SUPPORTED setting: several background services in the
+  # API — the scheduled-report runner, both inbound-mail pollers and the SLA
+  # monitor — have no leader election yet, so a second replica would send
+  # duplicate report emails and double-process incoming mail. Tracked in #1173;
+  # until it lands, do not raise this.
+  - target:
+      kind: Deployment
+      name: tms-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: Deployment
+      name: tms-web
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  # One database instance. No standby to promote — if this server dies, recovery
+  # is a restore from the nightly backup. That is the trade Stage A makes.
+  - target:
+      kind: Cluster
+      name: tms-postgres
+    patch: |-
+      - op: replace
+        path: /spec/instances
+        value: 1
+
+  # Keycloak trimmed to fit a 4 GB server.
+  #
+  # DEMO-SIZED, and a real compromise: memory limits are caps rather than
+  # reservations, so a token-issuance burst that would previously have been
+  # absorbed now risks an out-of-memory kill instead. The upstream sizing note
+  # says not to trim this without a load test. Raise it back to 1Gi as soon as
+  # the server has the memory to spare.
+  - target:
+      kind: Deployment
+      name: keycloak
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 768Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 384Mi

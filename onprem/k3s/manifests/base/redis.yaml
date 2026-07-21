@@ -1,0 +1,116 @@
+---
+# Redis carries the SignalR backplane and nothing else.
+#
+# It holds no data worth keeping: losing it drops in-flight real-time
+# notifications between replicas and the clients reconnect. Deliberately no
+# persistence, no Sentinel, no clustering — a highly-available Redis would add
+# more failure modes than the one it protects against, and none of them would be
+# diagnosable by the person running this.
+#
+# On a single-replica install it is not needed at all. It is deployed anyway so
+# that scaling up later is a replica-count change rather than a new component.
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      # The default eviction timeout for an unreachable node is 5 minutes. For a
+      # component that holds no state and is cheap to restart, that is 5 minutes
+      # of degraded real-time updates for no reason.
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          # --save "" disables snapshotting entirely. There is nothing here worth
+          # writing to disk, and the fork-to-save would compete with PostgreSQL
+          # for the same I/O.
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Redis__Password
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

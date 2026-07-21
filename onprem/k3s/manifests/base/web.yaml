@@ -1,0 +1,128 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tms-web
+  labels:
+    app: tms-web
+spec:
+  selector:
+    app: tms-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tms-web
+  labels:
+    app: tms-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tms-web
+  template:
+    metadata:
+      labels:
+        app: tms-web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: postgres-ca
+          secret:
+            secretName: tms-postgres-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+      containers:
+        - name: web
+          image: ghcr.io/aimtjie/tms-web:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: tms-config
+          env:
+            # What the BROWSER is told to call. Same origin as the web app
+            # itself, because the ingress path-routes /api to the API service —
+            # so the WASM client's /bff/api-config returns a same-origin base and
+            # there is no cross-origin request to configure.
+            # __HOSTNAME__ is substituted at install time.
+            - name: ApiService__BaseUrl
+              value: https://__HOSTNAME__
+            - name: SignalR__Transport
+              value: WebSockets
+            # Server-side calls from the Blazor Server circuit to the API, over
+            # the cluster network rather than back out through the ingress.
+            - name: services__apiservice__http__0
+              value: http://tms-api
+            # The web host keeps its own DataProtection key ring in the same
+            # database, under a separate application name.
+            - name: ConnectionStrings__ticketdb
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: ConnectionStrings__ticketdb
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+            - name: postgres-ca
+              mountPath: /etc/postgres-tls
+              readOnly: true
+          # The web host waits for the API to create the DataProtection table
+          # before it can start, so its startup window is as generous as the
+          # API's. 40 x 15s = 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            failureThreshold: 12
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

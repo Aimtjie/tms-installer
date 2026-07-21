@@ -1,0 +1,41 @@
+---
+# Keep at least one instance of each tier serving while a node is drained for
+# maintenance. Without these, `tmsctl node drain` will happily evict the last
+# replica of a tier and take the system down during what was supposed to be a
+# routine operation.
+#
+# minAvailable: 1 rather than a percentage — the counts here are small enough
+# that a percentage rounds to something unhelpful.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tms-web
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tms-web
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tms-api
+spec:
+  # Note this has no effect while tms-api runs a single replica: a PDB cannot
+  # protect a tier that has only one member, and a drain will still evict it.
+  # It is here so that raising the replica count (once #1173 Track 2 lands) does
+  # not also require remembering to add this.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tms-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: keycloak

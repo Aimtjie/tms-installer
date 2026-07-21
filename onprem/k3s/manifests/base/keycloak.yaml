@@ -1,0 +1,189 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    app: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    # Health and metrics moved to their own port in Keycloak 25+. It is
+    # deliberately not exposed through the ingress.
+    - name: management
+      port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  strategy:
+    # Keycloak imports its realm at startup against a shared database. Overlapping
+    # an old and a new instance during a rollout risks both touching the schema at
+    # once, so replace rather than overlap.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        # Realm definition, created by bootstrap.sh from the tms-realm.json shipped
+        # in the release tarball.
+        #
+        # Deliberately NOT committed under this folder. The realm already exists in
+        # two places that must be changed together; a third copy here would be a
+        # third place to forget.
+        - name: realm
+          configMap:
+            name: keycloak-realm
+        # CA published by CloudNativePG, for verifying the database's TLS
+        # certificate. The JDBC URL below refers to this path.
+        - name: postgres-ca
+          secret:
+            secretName: tms-postgres-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+      containers:
+        - name: keycloak
+          # Same digest-pinned version used everywhere else in the project. A
+          # floating tag caused a silent break once already (#370).
+          image: quay.io/keycloak/keycloak:26.5.6@sha256:8d44614c74798322c4e07fbe0ecb15cfbb5879d69b484628555f58ade06f0d8c
+          # `start` without --optimized: the stock image has not been built for
+          # this database configuration, so it performs the build step on first
+          # boot. That is slow, which is what the generous startupProbe is for.
+          args:
+            - start
+            # --import-realm is what actually reads the realm mounted at
+            # /opt/keycloak/data/import. Without it Keycloak starts perfectly
+            # happily, serves /health/ready, and has no tms realm — so the API's
+            # first admin call 404s, DbSeeder.SeedReferenceDataAsync throws, and
+            # tms-api crash-loops while every other pod reports healthy (#1236).
+            # Keycloak skips the import when the realm already exists, so this is
+            # safe on every restart, not just the first.
+            - --import-realm
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            # Served under /auth on the shared hostname, so the whole system needs
+            # one DNS record and one certificate. Requires the relative-path fix in
+            # #1178 — without it the API's admin and token calls drop the prefix
+            # and 404.
+            - name: KC_HTTP_RELATIVE_PATH
+              value: /auth
+            # Pin the management interface to the root explicitly. Whether it would
+            # otherwise inherit KC_HTTP_RELATIVE_PATH is version-dependent, and the
+            # probes below must not be guesswork — this makes the health paths
+            # deterministic regardless.
+            - name: KC_HTTP_MANAGEMENT_RELATIVE_PATH
+              value: /
+            - name: KC_HOSTNAME
+              value: https://__HOSTNAME__/auth
+            # TLS terminates at the ingress; Keycloak speaks plain HTTP inside the
+            # cluster and trusts the forwarded headers.
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_DB
+              value: postgres
+            # verify-full, matching the database's hostssl-only pg_hba. CNPG issues
+            # the certificate and publishes the CA, so nothing here needs renewing.
+            - name: KC_DB_URL
+              value: jdbc:postgresql://tms-postgres-rw:5432/keycloakdb?sslmode=verify-full&sslrootcert=/etc/postgres-tls/ca.crt
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tms-postgres-app
+                  key: username
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-postgres-app
+                  key: password
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminUsername
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminPassword
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+            - name: postgres-ca
+              mountPath: /etc/postgres-tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          # First boot runs the build step and imports the realm, which on a small
+          # server takes minutes. 40 x 15s = 10 minutes before liveness can fire.
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              # The JVM wants headroom for garbage collection and token-issuance
+              # bursts. The demo stage trims this to fit a 4 GB server; do not trim
+              # it on a real install without load-testing first.
+              memory: 1Gi

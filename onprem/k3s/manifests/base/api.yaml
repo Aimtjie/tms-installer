@@ -1,0 +1,180 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tms-api
+  labels:
+    app: tms-api
+spec:
+  selector:
+    app: tms-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tms-api
+  labels:
+    app: tms-api
+spec:
+  # Patched per stage. Note that more than one replica is only safe once the
+  # background services take leader election (tracked in #1173) — until then the
+  # scheduled-report and mailbox pollers would run on every replica.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tms-api
+  template:
+    metadata:
+      labels:
+        app: tms-api
+    spec:
+      # Images are public on GHCR, so there is no pull secret and nothing that
+      # expires. That is deliberate: a credential that needs renewing is a
+      # scheduled outage at a site nobody can reach.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: attachments
+          persistentVolumeClaim:
+            claimName: tms-attachments
+        # CA published by CNPG for verifying the database's TLS certificate.
+        - name: postgres-ca
+          secret:
+            secretName: tms-postgres-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+      containers:
+        - name: api
+          # Digest pinned by the release tarball. A tag would mean a pod restart
+          # eight months from now silently pulls whatever main has become.
+          image: ghcr.io/aimtjie/tms-api:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: tms-config
+          env:
+            - name: Jwt__Secret
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Jwt__Secret
+            - name: Encryption__BlindIndexSecret
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Encryption__BlindIndexSecret
+            - name: ConnectionStrings__ticketdb
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: ConnectionStrings__ticketdb
+            - name: Keycloak__AdminUsername
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminUsername
+            - name: Keycloak__AdminPassword
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminPassword
+            # Only needed for Microsoft Entra sign-in; absent otherwise, and the
+            # API logs that it is skipping SSO client setup rather than failing.
+            - name: Sso__Keycloak__ClientSecret
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Sso__Keycloak__ClientSecret
+                  optional: true
+            # Absent on a single-server install. Without it the API logs a
+            # warning that the SignalR backplane is in-memory, which is correct
+            # and harmless when there is only one replica.
+            - name: ConnectionStrings__redis
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: ConnectionStrings__redis
+                  optional: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+            - name: attachments
+              mountPath: /var/tms/attachments
+            - name: postgres-ca
+              mountPath: /etc/postgres-tls
+              readOnly: true
+          # startupProbe holds liveness and readiness off until boot finishes.
+          # First boot runs migrations and warms every tenant's encryption key,
+          # which on a small server takes minutes — without this the liveness
+          # probe kills the pod mid-migration and it never converges.
+          # 40 x 15s = 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tms-attachments
+  labels:
+    app: tms
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path

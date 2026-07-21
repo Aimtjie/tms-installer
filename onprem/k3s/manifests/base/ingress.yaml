@@ -1,0 +1,127 @@
+---
+# Single-origin ingress.
+#
+# Everything lives under ONE hostname on different paths:
+#
+#   /api/    /hubs/    /odata/   ->  tms-api
+#   /auth/                       ->  keycloak
+#   /                            ->  tms-web
+#
+# One DNS record, one certificate, and — because the browser only ever talks to
+# one origin — no CORS configuration to get wrong. The WASM client asks the web
+# host for its API base address and is told "same origin as you", so a
+# cross-origin request never happens.
+#
+# The alternative (a second hostname for Keycloak) costs another DNS record,
+# another name on the certificate, and brings CORS back.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tms
+  labels:
+    app: tms
+  annotations:
+    # Long-lived connections: SignalR for notifications, and the Blazor Server
+    # circuit. The default 60s read timeout closes both mid-session.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Uploads: a manifest CSV and its companion archive share one multipart body.
+    # Must not be lower than Kestrel__Limits__MaxRequestBodySize in tms-config.
+    nginx.ingress.kubernetes.io/proxy-body-size: "160m"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - __HOSTNAME__
+      secretName: tms-tls
+  rules:
+    - host: __HOSTNAME__
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          - path: /odata
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-web
+                port:
+                  number: 80
+---
+# Sticky routes, split out because they need cookie affinity and the routes above
+# must NOT have it.
+#
+# Two independent reasons this is required, not optional:
+#
+# 1. The web app uses InteractiveAutoRenderMode. The FIRST visit runs as a real
+#    Blazor Server circuit over /_blazor, and a circuit lives in one pod's memory.
+#    The Redis backplane does not make circuits portable — nothing does.
+#
+# 2. The notification hub sets AllowStatefulReconnects, which buffers per-connection
+#    state in pod memory. The backplane does not replicate that buffer either, so a
+#    reconnect landing on a different pod silently loses it (#592).
+#
+# Affinity is deliberately absent from /api: those requests are stateless and
+# pinning them would concentrate load for no benefit. It is configured even on a
+# single-replica install, where it is inert — so that scaling up is a replica-count
+# change and not a debugging session.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tms-sticky
+  labels:
+    app: tms
+  annotations:
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/affinity-mode: persistent
+    nginx.ingress.kubernetes.io/session-cookie-name: tms-affinity
+    nginx.ingress.kubernetes.io/session-cookie-path: /
+    nginx.ingress.kubernetes.io/session-cookie-samesite: Lax
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - __HOSTNAME__
+      secretName: tms-tls
+  rules:
+    - host: __HOSTNAME__
+      http:
+        paths:
+          # SignalR notification hub — served by the API.
+          - path: /hubs
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          # Blazor Server circuit — served by the web host.
+          - path: /_blazor
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-web
+                port:
+                  number: 80

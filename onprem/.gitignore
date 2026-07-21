@@ -1,0 +1,20 @@
+# Runtime artifacts created by bootstrap.sh on a real server.
+#
+# They only appear here if someone installs from a source checkout rather than
+# the release tarball — but this whole folder is mirrored to a PUBLIC repository,
+# so the cost of forgetting is permanent and the cost of this file is nothing.
+
+# Encrypted secrets bundle. Encrypted, but an attacker who has it only needs the
+# passphrase, and it should live in a password manager rather than a git tree.
+tms-secrets-escrow.enc
+
+# Diagnostics archive. Redacted, but generated from live logs.
+tms-support-*.tar.gz
+
+# The realm definition is copied in by the release packaging, not committed.
+# It already exists in two places that must be kept in step; a third copy in git
+# would be a third place to forget.
+k3s/tms-realm.json
+
+# Rendered manifests, for inspection before applying.
+*.rendered.yaml

@@ -1,0 +1,91 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Stage B — three servers, high availability.
+#
+# ⚠ READ THIS BEFORE DEPLOYING. Two prerequisites are NOT yet satisfied, and this
+# overlay is configured conservatively because of them. See ../README.md.
+#
+#   1. The API cannot yet run more than one replica. Its scheduled-report runner,
+#      both inbound-mail pollers and the SLA monitor have no leader election, so a
+#      second replica sends duplicate report emails, double-processes incoming
+#      mail and can double-advance escalations. Tracked in #1173 Track 2.
+#      Until that lands, tms-api stays at 1 and HA means "rescheduled within
+#      about a minute", not "no interruption".
+#
+#   2. Attachments must be on storage every node can reach. The default
+#      local-path StorageClass is node-local: if the node holding it dies, the
+#      volume is gone AND the API cannot start anywhere else. Set
+#      K8S_STORAGE_CLASS to a shared class (NFS/SMB) before using this overlay,
+#      or wait for the Postgres storage provider (#1190), which removes the
+#      question entirely by putting attachments in the database.
+#
+# What Stage B DOES give you today, and it is the hard part: automatic PostgreSQL
+# failover. Lose the node holding the primary and a standby is promoted with no
+# data loss and no human involved.
+
+namespace: tms
+
+resources:
+  - ../base
+  - pod-disruption-budgets.yaml
+
+patches:
+  # ── Database: real HA ────────────────────────────────────────────
+  #
+  # Three instances with `synchronous: any 1` — a write is acknowledged once one
+  # standby has it, so losing a single node costs neither data nor availability.
+  #
+  # NEVER 2. With two instances there is nobody left to acknowledge writes when
+  # one goes down, so the primary stops accepting them — worse than a single
+  # instance, which at least keeps serving.
+  - target:
+      kind: Cluster
+      name: tms-postgres
+    patch: |-
+      - op: replace
+        path: /spec/instances
+        value: 3
+      - op: add
+        path: /spec/postgresql/synchronous
+        value:
+          method: any
+          number: 1
+
+  # ── Web: spread across nodes ─────────────────────────────────────
+  #
+  # Safe above one replica because the web host keeps no per-instance state that
+  # matters — its DataProtection keys live in the database, and Blazor Server
+  # circuits are pinned by the cookie affinity configured in the base ingress.
+  - target:
+      kind: Deployment
+      name: tms-web
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app: tms-web
+
+  # ── API: deliberately still 1 ────────────────────────────────────
+  #
+  # Raise to 3 only after leader election lands (#1173 Track 2). The value is
+  # stated explicitly rather than left to the base default so that the reason is
+  # attached to it.
+  - target:
+      kind: Deployment
+      name: tms-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  # Keycloak keeps the full memory limit here — Stage B assumes servers with
+  # enough memory not to need the Stage A compromise.
