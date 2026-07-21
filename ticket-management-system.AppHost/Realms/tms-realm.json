@@ -31,24 +31,55 @@
       "protocol": "openid-connect",
       "redirectUris": [
         "http://localhost:*/api/auth/sso/callback",
-        "https://localhost:*/api/auth/sso/callback",
-        "https://tms.plasid.tech/api/auth/sso/callback"
+        "https://localhost:*/api/auth/sso/callback"
       ],
-      "webOrigins": ["+"]
+      "webOrigins": [
+        "+"
+      ]
     }
   ],
   "roles": {
     "realm": [
-      { "name": "Customer",           "composite": false },
-      { "name": "Agent",              "composite": false },
-      { "name": "Admin",              "composite": false },
-      { "name": "SuperAdmin",         "composite": false },
-      { "name": "Director",           "composite": false },
-      { "name": "SDM",                "composite": false },
-      { "name": "TeamLead",           "composite": false },
-      { "name": "ServiceCoordinator", "composite": false },
-      { "name": "SupportEngineer",    "composite": false },
-      { "name": "HelpdeskAgent",      "composite": false }
+      {
+        "name": "Customer",
+        "composite": false
+      },
+      {
+        "name": "Agent",
+        "composite": false
+      },
+      {
+        "name": "Admin",
+        "composite": false
+      },
+      {
+        "name": "SuperAdmin",
+        "composite": false
+      },
+      {
+        "name": "Director",
+        "composite": false
+      },
+      {
+        "name": "SDM",
+        "composite": false
+      },
+      {
+        "name": "TeamLead",
+        "composite": false
+      },
+      {
+        "name": "ServiceCoordinator",
+        "composite": false
+      },
+      {
+        "name": "SupportEngineer",
+        "composite": false
+      },
+      {
+        "name": "HelpdeskAgent",
+        "composite": false
+      }
     ]
   }
 }
