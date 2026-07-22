@@ -264,7 +264,18 @@ over. If it is, restore the password from your secrets escrow bundle."
 else
     BS_NEW_SECRETS=1
     BS_JWT=$(env_get JWT_SECRET);            [ -n "$BS_JWT" ] || BS_JWT=$(gen)
-    BS_BLIND=$(env_get BLIND_INDEX_SECRET);  [ -n "$BS_BLIND" ] || BS_BLIND=$(gen)
+    BS_BLIND=$(env_get BLIND_INDEX_SECRET)
+    if [ -z "$BS_BLIND" ]; then
+        BS_BLIND=$(gen)
+        # Guard the irreversible action itself, not only preflight's advisory note (#1279 review).
+        # BLIND_INDEX_SECRET can never be changed: a generated one is correct for a NEW install but
+        # makes a RESTORE permanently unreadable. Warn where it is actually minted, so it cannot
+        # scroll past unseen the way a preflight line can — this is the last point a restoring
+        # operator can still stop before the fresh key is written.
+        warn "Generated a NEW BLIND_INDEX_SECRET — correct for a fresh install.
+  If you are RESTORING a backup, STOP now: put the ORIGINAL value in $TMS_ENV_FILE
+  first, or the restored data will be permanently unreadable."
+    fi
     BS_PGPW=$(env_get POSTGRES_PASSWORD);    [ -n "$BS_PGPW" ] || BS_PGPW=$(gen)
     BS_KCPW=$(env_get KEYCLOAK_ADMIN_PASSWORD); [ -n "$BS_KCPW" ] || BS_KCPW=$(gen)
     BS_REDISPW=$(gen)

@@ -38,17 +38,28 @@ is not a backup.
 
 | Setting | k3s | k8s | compose | swarm | Application setting |
 |---|:-:|:-:|:-:|:-:|---|
-| `JWT_SECRET` | ● | ● | ● | ● | `Jwt:Secret` |
-| `BLIND_INDEX_SECRET` | ● | ● | ● | ● | `Encryption:BlindIndexSecret` |
+| `JWT_SECRET` | ○ | ● | ● | ● | `Jwt:Secret` |
+| `BLIND_INDEX_SECRET` | ○ | ● | ● | ● | `Encryption:BlindIndexSecret` |
 | `POSTGRES_PASSWORD` | ● | ● | ● | ● | part of `ConnectionStrings:ticketdb` |
 | `KEYCLOAK_DB_PASSWORD` | ● | ● | ● | ● | — (Keycloak's own database login) |
 | `KEYCLOAK_ADMIN_PASSWORD` | ● | ● | ● | ● | `Keycloak:AdminPassword` |
 | `SSO_CLIENT_SECRET` | ○ | ○ | ○ | ○ | `Sso:Keycloak:ClientSecret`. Used only for Microsoft Entra sign-in, and auto-generated at install when left blank — you rarely need to set it. |
 
-**Both `JWT_SECRET` and `BLIND_INDEX_SECRET` must be at least 32 bytes.** This is
-enforced at startup, not at install: a shorter value makes the API refuse to
-start with a message naming the setting and the length it actually got. Generate
-them with `openssl rand -base64 48` and the length takes care of itself.
+On the **k3s** installer you can leave both `JWT_SECRET` and `BLIND_INDEX_SECRET`
+blank: bootstrap generates a strong value for each and writes them into the
+encrypted escrow bundle. Set one only to supply your own — most importantly when
+**restoring a backup**, where `BLIND_INDEX_SECRET` must exactly match the value
+the backup was taken with, or the restored data is unreadable. This is why k3s
+shows `○` above. The k8s, compose and swarm installers are **not yet implemented**;
+their `●` records the current expectation that you supply the values rather than
+verified installer behaviour, and preflight keeps failing a blank secret on those
+targets until one ships that generates them.
+
+**A value you _do_ supply must be at least 32 bytes.** This is enforced at
+startup, not at install: a shorter value makes the API refuse to start with a
+message naming the setting and the length it actually got — preflight also
+catches a too-short value up front. Generate them with `openssl rand -base64 48`
+and the length takes care of itself.
 
 ## Address and TLS
 

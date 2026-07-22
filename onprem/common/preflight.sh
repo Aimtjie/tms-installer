@@ -283,10 +283,28 @@ if [ -f "$PF_ENV_FILE" ]; then
 
     pf_get() { sed -n "s/^[[:space:]]*$1=//p" "$PF_ENV_FILE" | tail -n 1; }
 
+    # Blank is NOT a failure ON THE TARGET THAT GENERATES. The k3s bootstrap generates both of
+    # these when empty (step 5) and writes them into the encrypted escrow bundle it makes you
+    # store (step 6), so failing there would refuse a configuration that installer accepts — the
+    # #1215 inconsistency in mirror image (#1279). Only k3s mints them, so blank is accepted ONLY
+    # for k3s; other targets have no such step and must supply the values, exactly as CONFIG.md
+    # marks them. TMS_TARGET defaults to k3s (see CONFIG.md). A value that IS set is length-checked
+    # regardless of target: bootstrap uses it verbatim and the API refuses to start on anything
+    # shorter than 32 bytes, so this is the only place a supplied-but-short value is caught before
+    # it becomes a crash-looping pod.
+    pf_target=$(pf_get TMS_TARGET)
     for pf_key in JWT_SECRET BLIND_INDEX_SECRET; do
         pf_val=$(pf_get "$pf_key")
-        if [ -z "$pf_val" ]; then
-            pf_fail "$pf_key is empty"
+        if [ -z "$pf_val" ] && [ "${pf_target:-k3s}" = k3s ]; then
+            pf_pass "$pf_key not set — the installer will generate and escrow one"
+            if [ "$pf_key" = BLIND_INDEX_SECRET ]; then
+                pf_note 'A fresh value is correct for a NEW install. If you are RESTORING a backup,'
+                pf_note 'paste the ORIGINAL BLIND_INDEX_SECRET here first — a new one makes the'
+                pf_note 'restored data permanently unreadable.'
+            fi
+        elif [ -z "$pf_val" ]; then
+            pf_fail "$pf_key is empty — the ${pf_target:-k3s} target does not generate it for you"
+            pf_note 'Generate one with: openssl rand -base64 48'
         elif [ "${#pf_val}" -lt 32 ]; then
             pf_fail "$pf_key is ${#pf_val} characters — must be at least 32 bytes"
             pf_note 'Generate one with: openssl rand -base64 48'
