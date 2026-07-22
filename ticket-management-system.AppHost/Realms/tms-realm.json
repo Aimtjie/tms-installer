@@ -35,6 +35,21 @@
       ],
       "webOrigins": [
         "+"
+      ],
+      "protocolMappers": [
+        {
+          "name": "aad-oid",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "aadObjectId",
+            "claim.name": "oid",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "true"
+          }
+        }
       ]
     }
   ],
