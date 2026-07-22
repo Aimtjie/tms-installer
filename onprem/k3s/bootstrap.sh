@@ -445,6 +445,27 @@ k rollout status deployment/tms-api --timeout=900s >/dev/null 2>&1 \
     || warn 'API is taking longer than expected. Check: tmsctl logs api'
 k rollout status deployment/tms-web --timeout=600s >/dev/null 2>&1 || true
 
+# ── install the tmsctl command on PATH ──────────────────────────────
+# #1256 — the RUNBOOK, both READMEs and the messages below all call `tmsctl`
+# as a plain command, but nothing had put it on PATH, so an operator's first
+# `tmsctl status` returned "command not found". Install a thin wrapper that
+# forwards to the real script in the install tree.
+#
+# It must be a wrapper, NOT a symlink: tmsctl derives its root (lib/, .env,
+# manifests) from its own $0, so a symlink in /usr/local/bin would make it look
+# for those files there instead of here. The real script re-execs under sudo for
+# the root-only kubeconfig, so the plain `tmsctl ...` the docs show now works.
+if [ -d /usr/local/bin ]; then
+    cat > /usr/local/bin/tmsctl <<EOF
+#!/bin/sh
+# TMS operator CLI — installed by bootstrap (#1256). Forwards to the install
+# tree, so do not move or delete: $TMS_ROOT
+exec "$TMS_ROOT/tmsctl" "\$@"
+EOF
+    chmod 0755 /usr/local/bin/tmsctl
+    say '  installed the tmsctl command (run: tmsctl status)'
+fi
+
 # ── done ────────────────────────────────────────────────────────────
 say ''
 say "${C_GREEN}${C_BOLD}TMS is installed.${C_OFF}"

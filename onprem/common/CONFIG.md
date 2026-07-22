@@ -63,10 +63,13 @@ service under `/auth/`. That is why there is a single setting here rather than
 three URLs: same-origin means the browser never makes a cross-origin request, so
 there is no CORS configuration to get wrong, one DNS record, and one certificate.
 
-The certificate must cover `TMS_HOSTNAME` and include the **full chain**. A
-chain-only-on-your-desktop certificate is a common and confusing failure: your
-browser has the intermediate cached, so it works for you and fails for everyone
-else. `./tmsctl preflight` checks the chain.
+The certificate **must** cover `TMS_HOSTNAME` — preflight fails the install if it
+does not. It **should** include the **full chain**: a leaf-only certificate is a
+common and confusing failure, because your browser has the intermediate cached so
+it works for you and fails for everyone else. Preflight *warns* on a single
+certificate rather than blocking — a self-signed cert with no chain is a valid way
+to stand the system up for testing (see the k3s README) before your real
+certificate arrives, which you then swap in with `tmsctl cert replace`.
 
 On `compose` and `swarm`, TLS is optional because those targets are often placed
 behind a reverse proxy you already run. If you do that, the proxy must send

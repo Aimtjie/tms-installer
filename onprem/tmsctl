@@ -18,6 +18,23 @@ TMS_ENV_FILE=${TMS_ENV_FILE:-$TMS_ROOT/.env}
 TMS_KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
 export TMS_ENV_FILE TMS_KUBECONFIG
 
+# #1256 — every operational command reads cluster state through the k3s
+# kubeconfig, which bootstrap deliberately creates root-only on a client server
+# (--write-kubeconfig-mode=600). Run unprivileged it would hang/fail on an
+# unreadable file after printing a header — the confusing symptom a real operator
+# hit. Re-exec under sudo so both `tmsctl ...` (via the installed PATH wrapper)
+# and `./tmsctl ...` (straight from the install tree, as the READMEs show) work
+# as documented. Skipped when already root or when the config is readable (an
+# explicit KUBECONFIG override, or a differently-permissioned target).
+if [ "$(id -u)" -ne 0 ] && [ -e "$TMS_KUBECONFIG" ] && [ ! -r "$TMS_KUBECONFIG" ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        exec sudo "$TMS_ROOT/tmsctl" "$@"
+    fi
+    echo "tmsctl: reading cluster status needs $TMS_KUBECONFIG, which is root-only on" >&2
+    echo "        this server, and sudo is not available. Re-run this command as root." >&2
+    exit 1
+fi
+
 # shellcheck source=lib/common.sh
 . "$TMS_ROOT/lib/common.sh"
 

@@ -133,6 +133,31 @@ else
     pf_fail "Disk free on ${pf_disk_path}: ${pf_disk_gb} GB — need at least ${PF_MIN_DISK_GB} GB"
 fi
 
+# #1252 — when the disk is short AND on LVM, the usual cause is not a small disk
+# but an Ubuntu install that grew the root logical volume to only part of the
+# volume group, leaving the rest unclaimed. The operator sees a shortfall on a
+# machine that has plenty of physical disk, with no obvious next step — and on a
+# client install (#1173) cannot ask us. Surface the reclaim command. Detection is
+# read-only and needs NO root: findmnt reports the backing device, and an LVM
+# filesystem is a device-mapper node. `vgs`/`lvs` would confirm the free extents
+# but need privilege, so we point the operator at `sudo vgs` rather than run it.
+if [ "$pf_disk_gb" -lt "$PF_WANT_DISK_GB" ] && command -v findmnt >/dev/null 2>&1; then
+    # `|| true`: findmnt resolves / and /var/lib in practice, but a non-zero exit
+    # from a command substitution under `set -e` would abort preflight here and
+    # skip every check below — the #1237 failure mode. pf_swap does the same.
+    pf_src=$(findmnt -no SOURCE --target "$pf_disk_path" 2>/dev/null || true)
+    case "$pf_src" in
+        /dev/mapper/* | /dev/dm-*)
+            pf_note 'This filesystem is on LVM. A fresh Ubuntu install commonly leaves half the'
+            pf_note 'volume group unallocated, so the disk is larger than it looks. Confirm with:'
+            pf_note '  sudo vgs                      # a non-zero VFree is unclaimed space'
+            pf_note 'and reclaim it (this also grows the filesystem in place, no reboot):'
+            pf_note "  sudo lvextend -r -l +100%FREE $pf_src"
+            pf_note 'then run this check again.'
+            ;;
+    esac
+fi
+
 if [ "$PF_MODE" = ha ]; then
     # etcd fsyncs constantly; PostgreSQL writes its journal constantly. Sharing
     # one disk between them is a well-known way to make a cluster feel unwell

@@ -57,14 +57,44 @@ next to `tmsctl`, and both `bootstrap.sh` and `tmsctl` read it from there.
 cd onprem
 cp common/.env.example .env
 chmod 600 .env
-$EDITOR .env                 # hostname, certificate paths, backup location
+nano .env                    # hostname, certificate paths, backup location
 ./common/preflight.sh
 sudo ./k3s/bootstrap.sh      # or: sudo ./tmsctl install
 ```
 
+`nano` is one editor; use whichever you have. `$EDITOR .env` also works **only if
+that variable is set** — on a fresh server it usually is not, and the shell then
+tries to run a command called `.env`. If you would rather not use an editor at
+all, each value can be set from the command line, e.g.
+`sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 32)|" .env`.
+
 Then open `https://<your hostname>/` and follow the setup wizard to create the
 first administrator. **There are no default accounts** — nothing to change, and
 nothing to forget to change.
+
+### Generating a certificate for testing
+
+`bootstrap.sh` needs a TLS certificate that covers `TMS_HOSTNAME` before it will
+install. In production that certificate comes from your IT team or CA. To stand
+the system up **for testing before it arrives**, generate a self-signed one:
+
+```sh
+HOST=$(grep ^TMS_HOSTNAME= .env | cut -d= -f2)
+sudo mkdir -p /etc/tms/tls
+sudo openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout /etc/tms/tls/privkey.pem -out /etc/tms/tls/fullchain.pem \
+  -subj "/CN=$HOST" -addext "subjectAltName=DNS:$HOST"
+sudo chmod 600 /etc/tms/tls/privkey.pem
+```
+
+Point `TLS_CERT_FILE` / `TLS_KEY_FILE` in `.env` at those two paths (the defaults
+already do). Preflight will **warn** that the certificate has no chain — expected
+for self-signed, and survivable — and browsers will show a trust warning. When the
+real certificate arrives, swap it in without reinstalling:
+
+```sh
+sudo ./tmsctl cert replace /path/to/fullchain.pem /path/to/privkey.pem
+```
 
 One step the installer cannot do for you: **email**. TMS reads its mail settings
 from the database so they can be changed without a redeploy, so set them under
