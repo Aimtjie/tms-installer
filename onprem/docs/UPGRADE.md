@@ -16,8 +16,9 @@ tmsctl version
 tmsctl update --check
 ```
 
-Releases are listed at:
-<https://github.com/Aimtjie/Ticket-Management-System/releases>
+Published versions are the `sync: publish` commits in the public installer
+repository — the newest one names the current release:
+<https://github.com/Aimtjie/tms-installer/commits/main>
 
 ---
 

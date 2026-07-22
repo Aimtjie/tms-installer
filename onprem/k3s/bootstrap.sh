@@ -250,6 +250,17 @@ reach its database.
 
 If this installation is not one you want to keep, delete the namespace and start
 over. If it is, restore the password from your secrets escrow bundle."
+
+    # Back-fill the tms-sso client secret on an install that predates it (#1267).
+    # Add-only — never rotate an existing value, just supply the key when it is
+    # missing, so re-running bootstrap heals an older install instead of leaving the
+    # operator to patch it by hand. Regenerable plumbing (the API re-pushes it to
+    # Keycloak at startup), so minting a fresh one here is safe.
+    if ! k get secret tms-secrets -o jsonpath='{.data.Sso__Keycloak__ClientSecret}' 2>/dev/null | grep -q .; then
+        k patch secret tms-secrets --type merge \
+            -p "{\"stringData\":{\"Sso__Keycloak__ClientSecret\":\"$(gen)\"}}" >/dev/null
+        say '  added the missing tms-sso client secret'
+    fi
 else
     BS_NEW_SECRETS=1
     BS_JWT=$(env_get JWT_SECRET);            [ -n "$BS_JWT" ] || BS_JWT=$(gen)
@@ -257,6 +268,13 @@ else
     BS_PGPW=$(env_get POSTGRES_PASSWORD);    [ -n "$BS_PGPW" ] || BS_PGPW=$(gen)
     BS_KCPW=$(env_get KEYCLOAK_ADMIN_PASSWORD); [ -n "$BS_KCPW" ] || BS_KCPW=$(gen)
     BS_REDISPW=$(gen)
+    # The secret shared between the API and the tms-sso Keycloak client. The realm ships a
+    # placeholder the API overwrites at startup (EnsureSsoClientAsync), and the SSO callback
+    # authenticates the token exchange with it — so without it every Microsoft Entra sign-in
+    # fails at the callback while the pod stays healthy (#1267). Generated unconditionally: the
+    # sign-in button is gated by per-tenant IdP config, not by this value, so this is pure
+    # plumbing that must always be present. Honour an operator-supplied value, else mint one.
+    BS_SSO=$(env_get SSO_CLIENT_SECRET);     [ -n "$BS_SSO" ] || BS_SSO=$(gen)
 
     # verify-full against the CNPG-issued certificate, matching the TLS-only
     # pg_hba in the cluster manifest.
@@ -269,6 +287,7 @@ else
         --from-literal=Keycloak__AdminUsername=admin \
         --from-literal=Keycloak__AdminPassword="$BS_KCPW" \
         --from-literal=Redis__Password="$BS_REDISPW" \
+        --from-literal=Sso__Keycloak__ClientSecret="$BS_SSO" \
         --dry-run=client -o yaml | k apply -f - >/dev/null
     say '  generated'
 fi
@@ -318,6 +337,10 @@ if [ "$BS_NEW_SECRETS" = 1 ]; then
     BS_ESCROW="$BS_ROOT/tms-secrets-escrow.enc"
     BS_PASS=$(openssl rand -base64 24 | tr -d '\n')
 
+    # Only the secrets that cannot be regenerated go in here. The tms-sso client
+    # secret and the Redis password are deliberately left out: both are regenerable
+    # plumbing (the API re-pushes the SSO secret to Keycloak at startup), so a
+    # rebuild mints fresh ones with no data loss — unlike BLIND_INDEX_SECRET below.
     {
         printf 'TMS secrets escrow — %s\n' "$BS_HOSTNAME"
         printf 'Created: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -364,3 +364,12 @@ and send the archive, along with:
 - what changed recently — an upgrade, a certificate, a network change, a reboot
 
 That is usually enough to get an answer without a call.
+
+---
+
+## 11. Removing TMS
+
+To take TMS off a server — to reinstall it cleanly, or to give the machine back —
+see `UNINSTALL.md`. It covers both removing just the application (to reinstall on
+the same server) and wiping the machine entirely, and what you must back up first
+if you want the data.

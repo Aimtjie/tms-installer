@@ -43,7 +43,7 @@ is not a backup.
 | `POSTGRES_PASSWORD` | ● | ● | ● | ● | part of `ConnectionStrings:ticketdb` |
 | `KEYCLOAK_DB_PASSWORD` | ● | ● | ● | ● | — (Keycloak's own database login) |
 | `KEYCLOAK_ADMIN_PASSWORD` | ● | ● | ● | ● | `Keycloak:AdminPassword` |
-| `SSO_CLIENT_SECRET` | ○ | ○ | ○ | ○ | `Sso:Keycloak:ClientSecret`. Only needed for Microsoft Entra sign-in. |
+| `SSO_CLIENT_SECRET` | ○ | ○ | ○ | ○ | `Sso:Keycloak:ClientSecret`. Used only for Microsoft Entra sign-in, and auto-generated at install when left blank — you rarely need to set it. |
 
 **Both `JWT_SECRET` and `BLIND_INDEX_SECRET` must be at least 32 bytes.** This is
 enforced at startup, not at install: a shorter value makes the API refuse to

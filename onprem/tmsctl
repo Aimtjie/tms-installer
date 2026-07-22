@@ -136,8 +136,9 @@ Anything created since that snapshot will be lost."
             --check)
                 say "Installed: $(target_version_short)"
                 say ''
-                say 'Compare against the latest release at:'
-                say '  https://github.com/Aimtjie/Ticket-Management-System/releases'
+                say 'Compare against the latest published version — the newest'
+                say '"sync: publish" commit names the current release:'
+                say '  https://github.com/Aimtjie/tms-installer/commits/main'
                 ;;
             '')  die "Usage: tmsctl update --check | tmsctl update <tarball>" ;;
             *)

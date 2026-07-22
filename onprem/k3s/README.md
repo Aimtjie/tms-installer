@@ -186,3 +186,6 @@ say so at install time and Stage A will be built the clustered way from the star
 
 Operating procedures — a server failing, restoring, replacing the certificate,
 upgrading — are in `../docs/RUNBOOK.md`. Read section 4 before you need it.
+
+To remove TMS — to reinstall it cleanly, or to give the server back — see
+`../docs/UNINSTALL.md`.
