@@ -71,8 +71,11 @@ data:
   RateLimiting__TrustedProxyCidrs__0: 10.42.0.0/16
 
   # ── Behaviour ────────────────────────────────────────────────────
-  Tickets__NumberPrefix: SS
-  Regions__Default: ZA
+  # Operator-configurable via .env (TICKET_NUMBER_PREFIX / REGIONS_DEFAULT); bootstrap substitutes
+  # these placeholders, defaulting to SS / ZA when unset. A hardcoded value here would silently
+  # ignore the operator's choice — the #1290 dead-config class.
+  Tickets__NumberPrefix: __TICKET_NUMBER_PREFIX__
+  Regions__Default: __REGIONS_DEFAULT__
 
   # First administrator is created through the /setup wizard on first visit.
   # There are no seeded accounts.

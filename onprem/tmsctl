@@ -82,7 +82,7 @@ Implemented for k3s; compose and swarm adapters are tracked separately.
 For now use the docker commands documented in $TMS_ROOT/$TMS_TARGET/README.md."
         }
         for _cmd in target_status target_logs target_backup target_support_bundle \
-                    target_cert_replace target_node; do
+                    target_cert_replace target_node target_update; do
             eval "$_cmd() { unsupported \"\${TMS_SUBCOMMAND:-command}\"; }"
         done
         ;;
@@ -136,17 +136,12 @@ Anything created since that snapshot will be lost."
             --check)
                 say "Installed: $(target_version_short)"
                 say ''
-                say 'Compare against the latest published version — the newest'
-                say '"sync: publish" commit names the current release:'
-                say '  https://github.com/Aimtjie/tms-installer/commits/main'
+                say 'The latest version, its release notes, and the update tarball are'
+                say 'on the installer releases page:'
+                say '  https://github.com/Aimtjie/tms-installer/releases/latest'
                 ;;
             '')  die "Usage: tmsctl update --check | tmsctl update <tarball>" ;;
-            *)
-                [ -r "$1" ] || die "Cannot read $1"
-                say 'Updating is a documented procedure — see docs/UPGRADE.md.'
-                say 'It takes a fresh backup before changing anything, and rolls back'
-                say 'automatically if the new version does not come up healthy.'
-                ;;
+            *)   target_update "$1" ;;
         esac
         ;;
 

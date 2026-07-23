@@ -16,9 +16,9 @@ tmsctl version
 tmsctl update --check
 ```
 
-Published versions are the `sync: publish` commits in the public installer
-repository — the newest one names the current release:
-<https://github.com/Aimtjie/tms-installer/commits/main>
+Published versions, each with its release notes and the update tarball attached,
+are on the installer releases page — the newest is the current release:
+<https://github.com/Aimtjie/tms-installer/releases/latest>
 
 ---
 
@@ -34,6 +34,9 @@ repository — the newest one names the current release:
 ---
 
 ## Upgrading
+
+Download the release's `tms-onprem-<version>.tar.gz` (and its `.sha256`) from the
+releases page above, copy both onto the server, then:
 
 ```sh
 tmsctl update ./tms-onprem-<version>.tar.gz

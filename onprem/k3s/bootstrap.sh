@@ -60,6 +60,14 @@ say "${C_BOLD}Step 2 — checking configuration${C_OFF}"
 BS_HOSTNAME=$(require_env TMS_HOSTNAME)
 BS_CERT=$(require_env TLS_CERT_FILE)
 BS_KEY=$(require_env TLS_KEY_FILE)
+
+# Operator-configurable behaviour, templated into the manifests at deploy (step 8). Resolved with a
+# default via env_get's second argument — NOT a `${VAR:-default}` in the sed itself, which #1223
+# forbids for placeholder substitution. Blank .env keeps the shipped defaults; a set value is honoured
+# (previously these were hardcoded in the manifests and silently ignored — the #1290 dead-config class).
+BS_PREFIX=$(env_get TICKET_NUMBER_PREFIX SS)
+BS_REGION=$(env_get REGIONS_DEFAULT ZA)
+BS_SCHEDULE=$(env_get BACKUP_SCHEDULE '0 2 * * *')
 [ -r "$BS_CERT" ] || die "Cannot read the certificate at $BS_CERT"
 [ -r "$BS_KEY" ]  || die "Cannot read the private key at $BS_KEY"
 
@@ -463,6 +471,9 @@ BS_OVERLAY="$BS_ROOT/k3s/manifests/stage-$BS_STAGE"
 "$(command -v kubectl || echo /usr/local/bin/kubectl)" kustomize "$BS_OVERLAY" \
     | sed -e "s|__HOSTNAME__|$BS_HOSTNAME|g" \
           -e "s|__POSTGRES_PASSWORD__|${BS_PGPW}|g" \
+          -e "s|__TICKET_NUMBER_PREFIX__|$BS_PREFIX|g" \
+          -e "s|__REGIONS_DEFAULT__|$BS_REGION|g" \
+          -e "s|__BACKUP_SCHEDULE__|$BS_SCHEDULE|g" \
     > "$BS_RENDER/tms.yaml"
 
 k_global apply -f "$BS_RENDER/tms.yaml" >/dev/null

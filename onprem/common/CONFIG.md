@@ -40,8 +40,7 @@ is not a backup.
 |---|:-:|:-:|:-:|:-:|---|
 | `JWT_SECRET` | ○ | ● | ● | ● | `Jwt:Secret` |
 | `BLIND_INDEX_SECRET` | ○ | ● | ● | ● | `Encryption:BlindIndexSecret` |
-| `POSTGRES_PASSWORD` | ● | ● | ● | ● | part of `ConnectionStrings:ticketdb` |
-| `KEYCLOAK_DB_PASSWORD` | ● | ● | ● | ● | — (Keycloak's own database login) |
+| `POSTGRES_PASSWORD` | ● | ● | ● | ● | part of `ConnectionStrings:ticketdb`. On k3s, Keycloak shares this database login (one `tms` role owns both `ticketdb` and `keycloakdb`). |
 | `KEYCLOAK_ADMIN_PASSWORD` | ● | ● | ● | ● | `Keycloak:AdminPassword` |
 | `SSO_CLIENT_SECRET` | ○ | ○ | ○ | ○ | `Sso:Keycloak:ClientSecret`. Used only for Microsoft Entra sign-in, and auto-generated at install when left blank — you rarely need to set it. |
 

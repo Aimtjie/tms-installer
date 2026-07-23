@@ -23,7 +23,9 @@ metadata:
   labels:
     app: tms-backup
 spec:
-  schedule: "0 2 * * *"
+  # Operator-configurable via .env (BACKUP_SCHEDULE); bootstrap substitutes this, defaulting to
+  # "0 2 * * *" when unset. A hardcoded value would silently ignore the operator's choice (#1290).
+  schedule: "__BACKUP_SCHEDULE__"
   timeZone: Etc/UTC
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 7

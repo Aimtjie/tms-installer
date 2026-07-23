@@ -177,6 +177,144 @@ target_backup() {
     esac
 }
 
+# ── update ──────────────────────────────────────────────────────────
+# Apply a release tarball (built by scripts/build-onprem-release.sh, #1180) and
+# roll the APPLICATION back if it does not come up healthy.
+#
+# Scope: this applies the release's pinned APP IMAGE DIGESTS — the common case,
+# since a new TMS version is a new image and DB migrations run at API startup. It
+# does NOT re-apply structural configmap/manifest changes; those remain a manual
+# step for now (the fuller component-by-component apply was deliberately deferred).
+#
+# The database is never auto-rolled. The stateless tiers revert cleanly through
+# ReplicaSet history, but a database cannot be silently rewound without risking
+# whatever was written since the update began — so a fresh backup is taken first,
+# the update STOPS if that backup fails, and DB recovery is a deliberate restore
+# (RUNBOOK 6.3), not something this command does behind the operator's back.
+target_update() {
+    _up_tar=$1
+    [ -r "$_up_tar" ] || die "Cannot read $_up_tar"
+
+    # 1. Verify the download before it is allowed anywhere near a live deployment.
+    #    The release ships a .sha256 next to the tarball; check it when present.
+    if [ -r "$_up_tar.sha256" ]; then
+        info 'Verifying the download ...'
+        ( cd "$(dirname "$_up_tar")" && sha256sum -c "$(basename "$_up_tar").sha256" ) >/dev/null 2>&1 \
+            || die "Checksum check failed for $_up_tar. Do not install it — re-download and try again."
+    else
+        warn "No $_up_tar.sha256 found next to the tarball — cannot verify its integrity."
+    fi
+
+    # 2. Unpack and read the new release's identity.
+    _up_work=$(mktemp -d)
+    tar -xzf "$_up_tar" -C "$_up_work" 2>/dev/null \
+        || { rm -rf "$_up_work"; die "Could not unpack $_up_tar."; }
+    _up_new=$(find "$_up_work" -maxdepth 1 -type d -name 'tms-onprem-*' | head -1)
+    { [ -n "$_up_new" ] && [ -r "$_up_new/manifest.lock" ]; } \
+        || { rm -rf "$_up_work"; die "$_up_tar is not a TMS release tarball (no manifest.lock inside)."; }
+
+    _up_from=$(target_version_short)
+    _up_to=$(sed -n 's/^version=//p' "$_up_new/manifest.lock" | head -1)
+
+    # 3. Show what changes, and make the operator confirm against a live system.
+    say ''
+    say "Updating from ${_up_from} to ${_up_to}."
+    if [ -r "$TMS_ROOT/manifest.lock" ]; then
+        _up_diff=$(diff "$TMS_ROOT/manifest.lock" "$_up_new/manifest.lock" 2>/dev/null || true)
+        [ -n "$_up_diff" ] && { say ''; say 'Changes to what is deployed:'; printf '%s\n' "$_up_diff"; }
+    fi
+    confirm_destructive "About to update this live installation to ${_up_to}."
+
+    # 4. Preflight the machine (the current tree reads the current .env).
+    info 'Checking this machine is still suitable ...'
+    "$TMS_ROOT/common/preflight.sh" --env "$TMS_ENV_FILE" >/dev/null 2>&1 \
+        || die "Preflight failed — run 'tmsctl preflight' and fix what it reports before updating."
+
+    # 5. Take a backup and STOP if it does not complete. Because the database is
+    #    never auto-rolled, this backup is the only way back if the DB is affected.
+    _up_job="tms-backup-preupdate-$(date -u +%Y%m%d%H%M%S)"
+    info "Taking a pre-update backup ($_up_job) ..."
+    k create job "$_up_job" --from=cronjob/tms-backup >/dev/null 2>&1 \
+        || { rm -rf "$_up_work"; die "Could not start the pre-update backup. Nothing has been changed."; }
+    if ! k wait --for=condition=complete --timeout=14400s "job/$_up_job" >/dev/null 2>&1; then
+        rm -rf "$_up_work"
+        die "The pre-update backup did not complete. Nothing has been changed — check: tmsctl logs backup"
+    fi
+    say '  backup complete'
+
+    # 6. Apply the new APP image digests from the release's manifest.lock — the
+    #    pinned digests, never a tag. Only the stateless tiers are touched; the
+    #    database is left exactly as it is. Each tier is applied only if its image
+    #    actually changes, so a tier already on the target keeps its rollout history
+    #    intact and is never mistakenly undone in step 8.
+    _up_api=$(sed -n 's/^tms-api=//p'  "$_up_new/manifest.lock" | head -1)
+    _up_web=$(sed -n 's/^tms-web=//p'  "$_up_new/manifest.lock" | head -1)
+    _up_kc=$(sed -n  's/^keycloak=//p' "$_up_new/manifest.lock" | head -1)
+    { [ -n "$_up_api" ] && [ -n "$_up_web" ]; } \
+        || { rm -rf "$_up_work"; die "The release manifest.lock is missing an app image digest."; }
+
+    info 'Applying the new version ...'
+    _up_changed=''
+
+    _up_cur=$(k get deployment/tms-api -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+    if [ "$_up_api" != "$_up_cur" ]; then
+        k set image deployment/tms-api "api=$_up_api" >/dev/null
+        _up_changed="$_up_changed tms-api"
+    fi
+
+    _up_cur=$(k get deployment/tms-web -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+    if [ "$_up_web" != "$_up_cur" ]; then
+        k set image deployment/tms-web "web=$_up_web" >/dev/null
+        _up_changed="$_up_changed tms-web"
+    fi
+
+    if [ -n "$_up_kc" ]; then
+        _up_cur=$(k get deployment/keycloak -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+        if [ "$_up_kc" != "$_up_cur" ]; then
+            k set image deployment/keycloak "keycloak=$_up_kc" >/dev/null
+            _up_changed="$_up_changed keycloak"
+        fi
+    fi
+
+    if [ -z "$_up_changed" ]; then
+        cp -a "$_up_new/." "$TMS_ROOT/" 2>/dev/null || true
+        rm -rf "$_up_work"
+        say "Already running ${_up_to} — the tree and manifest.lock have been refreshed."
+        return 0
+    fi
+
+    # 7. Wait for each changed tier to go healthy.
+    _up_ok=1
+    for _up_d in $_up_changed; do
+        k rollout status "deployment/$_up_d" --timeout=600s || { _up_ok=0; break; }
+    done
+
+    if [ "$_up_ok" = 1 ]; then
+        # 8a. Success — adopt the new tree so tmsctl/lib/manifest.lock report the new
+        #     version. .env is not in the tarball, so it is preserved. This process
+        #     already sourced its code into memory, so overwriting the files is safe.
+        cp -a "$_up_new/." "$TMS_ROOT/" 2>/dev/null || true
+        rm -rf "$_up_work"
+        say ''
+        say "Updated to ${_up_to}. Check it over with: tmsctl status"
+        say 'Then log in and do something ordinary — only a person can confirm it works.'
+    else
+        # 8b. Failure — roll back ONLY the tiers this update changed, and leave the
+        #     tree/manifest.lock untouched so the version still reads as the old one.
+        warn 'The new version did not come up healthy — rolling the application back.'
+        for _up_d in $_up_changed; do
+            k rollout undo "deployment/$_up_d" >/dev/null 2>&1 || true
+        done
+        for _up_d in $_up_changed; do
+            k rollout status "deployment/$_up_d" --timeout=600s >/dev/null 2>&1 || true
+        done
+        rm -rf "$_up_work"
+        die "Update to ${_up_to} failed and the application was rolled back. The database was left
+untouched and your pre-update backup ($_up_job) is intact. Collect diagnostics with:
+tmsctl support-bundle"
+    fi
+}
+
 # ── support bundle ──────────────────────────────────────────────────
 # With no remote access into a client's installation, this archive is the whole
 # diagnostic channel. It is built early and redacted hard for that reason.
