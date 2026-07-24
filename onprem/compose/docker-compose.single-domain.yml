@@ -1,0 +1,109 @@
+# Single-domain overlay for the root docker-compose.yml (#1182).
+#
+# Serves the whole system — web app, API, SignalR and Keycloak sign-in — from ONE
+# hostname behind a reverse proxy, e.g. https://tms.server.domain. One DNS record,
+# one TLS certificate, and — because the browser only ever talks to one origin —
+# no cross-origin request rules to get wrong.
+#
+# This is an OVERLAY, layered on top of the root stack (it adds a proxy and
+# overrides a handful of environment values). The root docker-compose.yml,
+# install.sh and swarm/** are deliberately left untouched (#1182). Run it as:
+#
+#   cp onprem/compose/.env.single-domain.example .env   # then fill in the values
+#   docker compose --env-file .env \
+#     -f docker-compose.yml \
+#     -f onprem/compose/docker-compose.single-domain.yml \
+#     up -d
+#
+# Relative paths below resolve from the project directory (the directory of the
+# FIRST -f file — the repo root), so run the command from there.
+#
+# The proxy is the ONLY service that publishes to the host (80/443). This overlay
+# un-publishes the app + Keycloak host ports entirely (ports: !reset []), so they
+# are reachable only by the proxy over the internal Docker network — regardless of
+# BIND_ADDRESS. See onprem/compose/README.md.
+
+name: tms
+
+services:
+  # --- Reverse proxy: terminates TLS, routes by path to one origin ---
+  # nginx is the default (swap in Caddy or Traefik per onprem/compose/README.md).
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+      apiservice:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    ports:
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./onprem/compose/proxy/nginx.conf:/etc/nginx/conf.d/tms.conf:ro
+      # Operator-supplied TLS material (absolute paths on the host). For a
+      # self-signed cert to test before the real one arrives, see the README.
+      - ${TLS_CERT_FILE}:/etc/nginx/tls/fullchain.pem:ro
+      - ${TLS_KEY_FILE}:/etc/nginx/tls/privkey.pem:ro
+    healthcheck:
+      # nginx:alpine ships busybox wget. /healthz is a 200-only internal location.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # --- Keycloak served under /auth on the shared hostname ---
+  # Validated against the Keycloak 26 docs (Configuring a reverse proxy /
+  # Configuring the hostname v2): the static full-URL form. KC_HTTP_RELATIVE_PATH
+  # moves every endpoint under /auth — INCLUDING server-to-server calls inside the
+  # Docker network, which never pass through the proxy and so get no path rewrite.
+  # That is why the API's Keycloak__BaseUrl below also carries /auth (#1217).
+  keycloak:
+    environment:
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: ${TMS_PUBLIC_URL:?TMS_PUBLIC_URL is required — set it in .env}/auth
+      # KC_PROXY_HEADERS=xforwarded is already set in the root compose file.
+    # Un-publish the host port: the proxy reaches Keycloak over the Docker network,
+    # and the admin console must not be exposed. !reset clears the inherited ports.
+    ports: !reset []
+
+  # --- API: same-origin, behind TLS, Keycloak reachable under /auth ---
+  apiservice:
+    environment:
+      # In-cluster call to Keycloak — carries the SAME /auth prefix Keycloak is
+      # served under, because these calls bypass the proxy (#1217).
+      Keycloak__BaseUrl: http://keycloak:8080/auth
+      # Public-facing Keycloak URL rendered into SSO setup instructions.
+      Keycloak__PublicBaseUrl: ${TMS_PUBLIC_URL:?TMS_PUBLIC_URL is required — set it in .env}/auth
+      # Same origin as the web app — kills CORS. Exact-match, so it is the one origin.
+      Cors__WebOrigin: ${TMS_PUBLIC_URL:?TMS_PUBLIC_URL is required — set it in .env}
+      Sso__WebRedirectBaseUrl: ${TMS_PUBLIC_URL:?TMS_PUBLIC_URL is required — set it in .env}
+      # TLS terminates at the proxy; trust its X-Forwarded-Proto so Secure cookies
+      # + HSTS engage and /setup does not 500 (#997/#908 class).
+      Security__RequireHttps: "true"
+      # The proxy reaches the API from the Docker network, NOT loopback — so the
+      # loopback-only default in the root file would reject its forwarded headers.
+      # Trust the compose network range (Docker's default address pools live in
+      # 172.16.0.0/12). Narrow it to your actual network CIDR to tighten.
+      RateLimiting__TrustedProxyCidrs__0: ${TRUSTED_PROXY_CIDR:-172.16.0.0/12}
+      # External SSO (Entra/OIDC): when set, the API activates SSO and registers
+      # {Sso__WebRedirectBaseUrl}/api/auth/sso/callback on the tms-sso Keycloak client
+      # at startup (EnsureSsoClientAsync) — so the single-domain callback templates
+      # itself, no manual realm edit. Empty = SSO disabled (ssoEnabled=false).
+      Sso__Keycloak__ClientSecret: ${SSO_CLIENT_SECRET:-}
+    # Un-publish the host port — only the proxy is exposed (80/443).
+    ports: !reset []
+
+  # --- Web: browser talks to the single origin for API + SignalR ---
+  web:
+    environment:
+      # Browser-facing base URL returned by /bff/api-config to the WASM client.
+      # Same origin: the proxy splits /api + /hubs off to the API by path.
+      ApiService__BaseUrl: ${TMS_PUBLIC_URL:?TMS_PUBLIC_URL is required — set it in .env}
+      Security__RequireHttps: "true"
+      RateLimiting__TrustedProxyCidrs__0: ${TRUSTED_PROXY_CIDR:-172.16.0.0/12}
+    # Un-publish the host port — only the proxy is exposed (80/443).
+    ports: !reset []

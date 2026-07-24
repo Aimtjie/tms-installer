@@ -1,0 +1,54 @@
+# TMS single-domain reverse proxy (Caddy) — #1182.
+#
+# Alternative to the default nginx.conf. Caddy handles WebSocket upgrades and
+# X-Forwarded-* headers automatically, and can obtain a TLS certificate for you.
+#
+# `handle` blocks are evaluated in source order and are mutually exclusive
+# (first match wins), so /auth/realms/ and /auth/resources/ are matched BEFORE the
+# /auth/* block that returns 403 — the tighter admin restriction. See the README
+# "Choosing a different proxy" for the compose service snippet that mounts this.
+
+{$TMS_HOSTNAME} {
+	# Operator-supplied certificate (works for internal hostnames with no public DNS).
+	# Delete this line to let Caddy obtain a certificate automatically over ACME
+	# (requires the hostname to be publicly resolvable and reachable on 80/443).
+	tls /etc/caddy/tls/fullchain.pem /etc/caddy/tls/privkey.pem
+
+	# --- API ---
+	handle /api/* {
+		reverse_proxy apiservice:8080
+	}
+	handle /odata/* {
+		reverse_proxy apiservice:8080
+	}
+
+	# --- SignalR (WebSocket handled automatically) ---
+	handle /hubs/* {
+		reverse_proxy apiservice:8080
+	}
+
+	# --- Blazor Server circuit (WebSocket handled automatically) ---
+	# Named matcher (inline `handle` takes a single path token, so multiple paths need
+	# a named matcher): the bare hub path + its sub-paths only, not an unrelated /_blazorxyz.
+	@blazor path /_blazor /_blazor/*
+	handle @blazor {
+		reverse_proxy web:8080
+	}
+
+	# --- Keycloak: ONLY the sign-in paths are public ---
+	handle /auth/realms/* {
+		reverse_proxy keycloak:8080
+	}
+	handle /auth/resources/* {
+		reverse_proxy keycloak:8080
+	}
+	# Admin console + metrics stay internal.
+	handle /auth/* {
+		respond 403
+	}
+
+	# --- Web app (catch-all) ---
+	handle {
+		reverse_proxy web:8080
+	}
+}

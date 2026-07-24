@@ -1,0 +1,80 @@
+# TMS single-domain reverse proxy (Traefik) — dynamic configuration. #1182.
+#
+# Alternative to the default nginx.conf. This is Traefik's FILE-provider dynamic
+# config (routers + services + middleware). The static side (entrypoints, the file
+# provider, TLS cert) is passed as command flags on the traefik service — see the
+# README "Choosing a different proxy" for the compose service snippet.
+#
+# Router priority is explicit: the Keycloak sign-in routers (priority 100) win over
+# the /auth block router (priority 50), which wins over the web catch-all — so
+# /auth/realms/ and /auth/resources/ reach Keycloak while the rest of /auth is
+# blocked (the tighter admin restriction). Traefik proxies WebSockets transparently.
+#
+# Replace __TMS_HOSTNAME__ with your hostname (e.g. tms.server.domain).
+
+http:
+  routers:
+    api:
+      rule: "Host(`__TMS_HOSTNAME__`) && (PathPrefix(`/api/`) || PathPrefix(`/odata/`))"
+      service: tms-api
+      priority: 100
+      entryPoints: [websecure]
+      tls: {}
+
+    hubs:
+      rule: "Host(`__TMS_HOSTNAME__`) && PathPrefix(`/hubs/`)"
+      service: tms-api
+      priority: 100
+      entryPoints: [websecure]
+      tls: {}
+
+    blazor:
+      # Bare hub path and its sub-paths only, not an unrelated /_blazorxyz.
+      rule: "Host(`__TMS_HOSTNAME__`) && (Path(`/_blazor`) || PathPrefix(`/_blazor/`))"
+      service: tms-web
+      priority: 100
+      entryPoints: [websecure]
+      tls: {}
+
+    keycloak-signin:
+      rule: "Host(`__TMS_HOSTNAME__`) && (PathPrefix(`/auth/realms/`) || PathPrefix(`/auth/resources/`))"
+      service: tms-keycloak
+      priority: 100
+      entryPoints: [websecure]
+      tls: {}
+
+    # Everything else under /auth (admin console, metrics) is refused — kept internal.
+    keycloak-block:
+      rule: "Host(`__TMS_HOSTNAME__`) && PathPrefix(`/auth/`)"
+      service: noop@internal
+      middlewares: [deny-auth]
+      priority: 50
+      entryPoints: [websecure]
+      tls: {}
+
+    web:
+      rule: "Host(`__TMS_HOSTNAME__`)"
+      service: tms-web
+      priority: 1
+      entryPoints: [websecure]
+      tls: {}
+
+  middlewares:
+    deny-auth:
+      ipAllowList:
+        # No source IP is allowed — every request to a non-sign-in /auth path is refused.
+        sourceRange: ["255.255.255.255/32"]
+
+  services:
+    tms-api:
+      loadBalancer:
+        servers:
+          - url: "http://apiservice:8080"
+    tms-web:
+      loadBalancer:
+        servers:
+          - url: "http://web:8080"
+    tms-keycloak:
+      loadBalancer:
+        servers:
+          - url: "http://keycloak:8080"
