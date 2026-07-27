@@ -64,6 +64,16 @@ services:
   keycloak:
     environment:
       KC_HTTP_RELATIVE_PATH: /auth
+      # Pin the management interface (port 9000) to the root. The root compose
+      # healthcheck probes :9000/health/ready; without this pin the management path
+      # inherits KC_HTTP_RELATIVE_PATH (=/auth), health moves to /auth/health/ready,
+      # the probe 404s, keycloak reports unhealthy and every dependent service
+      # (apiservice/web/proxy) fails to start (#1335). The inheritance is documented as
+      # version-dependent, but it was confirmed on the 26.5.6 digest the root compose
+      # file pins (quay.io/keycloak/keycloak@sha256:8d44614c…) — so
+      # re-check this on the next Keycloak bump rather than assuming either way.
+      # Same pin, same reason, as the k3s target (onprem/k3s/.../keycloak.yaml).
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: "/"
       KC_HOSTNAME: ${TMS_PUBLIC_URL:?TMS_PUBLIC_URL is required — set it in .env}/auth
       # KC_PROXY_HEADERS=xforwarded is already set in the root compose file.
     # Un-publish the host port: the proxy reaches Keycloak over the Docker network,
