@@ -178,12 +178,33 @@ Username/password login works out of the box — the API validates credentials a
 Keycloak over the internal network. **External SSO (Microsoft Entra / OIDC)** is served
 at `https://tms.server.domain/auth` and is optional.
 
-To enable it, set `SSO_CLIENT_SECRET` in `.env`. On startup the API registers the
-callback `https://tms.server.domain/api/auth/sso/callback` on the `tms-sso` Keycloak
-client automatically (from `Sso__WebRedirectBaseUrl`, which the overlay points at your
-single origin — so the redirect URI templates itself, no manual realm edit). Then
-configure the Microsoft Entra identity provider per tenant from the TMS app UI
-(Client detail → SSO). Leave `SSO_CLIENT_SECRET` blank to keep SSO disabled.
+**Two independent secrets are involved — setting only one of them leaves SSO half-configured
+and login fails with a Keycloak 400 (`Invalid parameter: redirect_uri`), even though the
+sign-in button appears in the UI:**
+
+| Secret | What it's for | Where it comes from |
+|---|---|---|
+| `SSO_CLIENT_SECRET` in `.env` | Authenticates the **TMS API to Keycloak's own `tms-sso` client** — an entirely internal hop; Microsoft never sees it | **You generate it yourself** (e.g. `openssl rand -base64 32`) — it is not issued by Entra or anything else |
+| Entra Client Secret | Lets **Keycloak's identity broker authenticate to Microsoft Entra** for that tenant | Generated in the **Azure/Entra portal** under your App Registration → Certificates & secrets |
+
+To enable SSO, **both** must be set:
+
+1. Set `SSO_CLIENT_SECRET` in `.env` to any random value, then recreate the apiservice
+   container. On startup the API registers the callback
+   `https://tms.server.domain/api/auth/sso/callback` on the `tms-sso` Keycloak client
+   automatically (from `Sso__WebRedirectBaseUrl`, which the overlay points at your single
+   origin — so the redirect URI templates itself, no manual realm edit). Leave it blank to
+   keep SSO disabled.
+2. Configure the Microsoft Entra identity provider per tenant from the TMS app UI (Client
+   detail → SSO), pasting in the Entra-issued Tenant ID / Client ID / Client Secret. The
+   same screen displays the **broker redirect URI**
+   (`https://tms.server.domain/auth/realms/tms/broker/entra-<tenantId>/endpoint`) that must
+   be registered on the Entra App Registration side — a different URI from step 1's API
+   callback, and Microsoft's side to configure, not TMS's.
+
+Enabling only step 2 is a common trap: the tenant's SSO button shows up (its enablement is
+independent of step 1), but the very first redirect to Keycloak fails because the real
+callback URI was never added to `tms-sso`'s Valid Redirect URIs.
 
 ---
 
