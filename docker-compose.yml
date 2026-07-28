@@ -169,8 +169,16 @@ services:
       # Bitwarden Secrets Manager provider takes precedence over the values above.
       BWS_ACCESS_TOKEN: ${BWS_ACCESS_TOKEN:-}
       BWS_ORGANIZATION_ID: ${BWS_ORGANIZATION_ID:-}
+      # Local-provider file storage (attachments + import staging, #1355). The
+      # code default is a RELATIVE "attachments" path, which resolves against the
+      # container's /app — root-owned, so the non-root runtime user can't create
+      # it and every upload 500s. Point it at the writable, volume-backed absolute
+      # path mounted below instead.
+      Storage__Local__BasePath: /data/attachments
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${API_HTTP_PORT:-8080}:8080"
+    volumes:
+      - attachments_data:/data/attachments
     # /Logs is where the Serilog Development file sink writes (../Logs/ from /app).
     # tmpfs keeps it memory-backed and ephemeral — no host path needed.
     tmpfs:
@@ -231,7 +239,8 @@ services:
 volumes:
   # Docker prefixes managed volume names with the compose project name
   # (`name: tms` at the top of this file), so the final names visible to
-  # `docker volume ls` are `tms_postgres_data` and `tms_keycloak_data`.
+  # `docker volume ls` are `tms_postgres_data`, `tms_keycloak_data`, and
+  # `tms_attachments_data`.
   # Stored under /var/lib/docker/volumes/ on the host.
   # To use a bind mount instead (DB files visible in your working dir),
   # replace the empty driver block with:
@@ -243,3 +252,7 @@ volumes:
   #       o: bind
   postgres_data:
   keycloak_data:
+  # Ticket attachments + import staging files (Storage:Local:BasePath, #1355).
+  # The apiservice image pre-creates /data/attachments owned by its non-root
+  # runtime user, so this volume inherits that ownership on first mount.
+  attachments_data:
