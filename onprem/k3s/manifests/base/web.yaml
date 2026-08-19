@@ -21,6 +21,22 @@ metadata:
     app: tms-web
 spec:
   replicas: 1
+  strategy:
+    # #1758 — roll within the existing footprint rather than surging.
+    #
+    # The web tier is stateless and would be safe to run two of, so the reason to
+    # cap it here is capacity, not correctness. This target is documented down to
+    # a single 4 GB node, where a surge pod's 256Mi request may simply fail to
+    # schedule — and a rollout that stalls on "exceeded progress deadline" at a
+    # site nobody can reach is worse than a few seconds of downtime.
+    #
+    # The Helm chart in onprem/k8s deliberately does the opposite and keeps the
+    # default RollingUpdate: on a client's own cluster the capacity is theirs to
+    # size, and a zero-downtime upgrade is worth having.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: tms-web

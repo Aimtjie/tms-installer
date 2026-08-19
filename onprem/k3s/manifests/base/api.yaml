@@ -24,6 +24,22 @@ spec:
   # background services take leader election (tracked in #1173) — until then the
   # scheduled-report and mailbox pollers would run on every replica.
   replicas: 1
+  strategy:
+    # #1758 — replace, never overlap. With no strategy Kubernetes defaults to
+    # RollingUpdate with maxSurge 25%, which rounds UP to 1 for a single replica:
+    # a second API pod is started and waited on until Ready — up to ten minutes,
+    # per the startup probe below — before the first one is stopped.
+    #
+    # For that whole window there are two of every background service, and none
+    # of them takes leader election (#1173 Track 2). Two ReportSchedulerServices
+    # send a customer the same scheduled report twice; two
+    # RecoverInterruptedBatchesAsync sweeps claim in-flight import batches
+    # cluster-wide with no owner, so the starting pod takes over the running
+    # pod's import.
+    #
+    # Recreate costs a short gap during an upgrade. On a single-node install that
+    # is the right trade, and it matches keycloak and redis alongside.
+    type: Recreate
   selector:
     matchLabels:
       app: tms-api
