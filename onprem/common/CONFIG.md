@@ -49,10 +49,16 @@ blank: bootstrap generates a strong value for each and writes them into the
 encrypted escrow bundle. Set one only to supply your own — most importantly when
 **restoring a backup**, where `BLIND_INDEX_SECRET` must exactly match the value
 the backup was taken with, or the restored data is unreadable. This is why k3s
-shows `○` above. The k8s, compose and swarm installers are **not yet implemented**;
-their `●` records the current expectation that you supply the values rather than
-verified installer behaviour, and preflight keeps failing a blank secret on those
-targets until one ships that generates them.
+shows `○` above.
+
+The **k8s** target deliberately generates nothing: you create the Secret yourself
+before installing, and `../k8s/README.md` §3 explains why — every Helm idiom for
+generate-and-remember mints a NEW value during `helm template`, `--dry-run`, or
+any render without cluster access, and a regenerated `BLIND_INDEX_SECRET` is an
+unrecoverable database. The **compose** and **swarm** installers are still not
+implemented; their `●` records the current expectation that you supply the values
+rather than verified installer behaviour, and preflight keeps failing a blank
+secret on those targets until one ships that generates them.
 
 **A value you _do_ supply must be at least 32 bytes.** This is enforced at
 startup, not at install: a shorter value makes the API refuse to start with a
@@ -136,12 +142,21 @@ Maps to `Storage:Provider`, `Storage:Local:BasePath` and `Storage:S3:*`.
 > only the database. You would not find out until a restore. `./tmsctl install`
 > therefore validates this value against the list above and stops.
 
-## Kubernetes — `k3s` and `k8s` only
+## Kubernetes — `k3s`
+
+> **The `k8s` target does not read these.** It is a Helm chart, so everything
+> below is a value in `../k8s/values.example.yaml` instead — storage class,
+> namespace (`helm install -n`), replica counts and the database are all set
+> there. The keys this file still supplies on `k8s` are `TMS_TARGET` (which
+> tells `tmsctl` which adapter to load) and `K8S_NAMESPACE` (which namespace
+> `tmsctl status` and `tmsctl logs` look in — it must match the `helm install -n`
+> you used, or a healthy install is reported as absent). See
+> [`../k8s/README.md`](../k8s/README.md).
 
 | Setting | Default | Notes |
 |---|---|---|
 | `K8S_NAMESPACE` | `tms` | |
-| `K8S_STORAGE_CLASS` | `local-path` | `k3s` installs `local-path` for you. On `k8s`, name one your cluster provides — see `../k8s/README.md` for what it has to support. |
+| `K8S_STORAGE_CLASS` | `local-path` | ⚠ Advertised but **not yet consumed** — `k3s` hardcodes `local-path` in its manifests regardless of what you set here. Tracked in #1761. On `k8s`, use `storage.className` in the chart's values. |
 | `TMS_VIP` | — | 3-server HA only. An unused IP on the **same network segment** as all three servers. |
 | `REPLICAS_API` | `3` | |
 | `REPLICAS_WEB` | `3` | |

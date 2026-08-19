@@ -1,0 +1,134 @@
+---
+# Single-origin ingress.
+#
+# Everything lives under ONE hostname on different paths:
+#
+#   /api/    /odata/                    ->  tms-api
+#   {{ include "tms.keycloak.ingressPath" . }}/  ->  keycloak
+#   /                                   ->  tms-web
+#
+# One DNS record, one certificate, and — because the browser only ever talks to
+# one origin — no CORS configuration to get wrong. The WASM client asks the web
+# host for its API base address and is told "same origin as you", so a
+# cross-origin request never happens.
+#
+# The alternative, a second hostname for Keycloak, costs another DNS record,
+# another name on the certificate, and brings CORS back.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tms
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+  {{- $ann := include "tms.ingress.baseAnnotations" . }}
+  {{- if or $ann .Values.commonAnnotations }}
+  annotations:
+    {{- with $ann }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ .Values.hostname | quote }}
+      secretName: {{ .Values.tls.secretName }}
+  rules:
+    - host: {{ .Values.hostname | quote }}
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          - path: /odata
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          # Always rendered. _validate.tpl refuses a root relativePath, so this is
+          # always a real prefix. An earlier version guarded this block, so a
+          # relativePath of "/" produced an ingress with NO route to sign-in and
+          # nothing reported a problem.
+          - path: {{ include "tms.keycloak.ingressPath" . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-web
+                port:
+                  number: 80
+---
+# Sticky routes, split into their own object because they need cookie affinity
+# and the routes above must NOT have it.
+#
+# Two independent reasons this is required, not optional:
+#
+# 1. The web app uses InteractiveAutoRenderMode. The FIRST visit runs as a real
+#    Blazor Server circuit over /_blazor, and a circuit lives in one pod's
+#    memory. The Redis backplane does not make circuits portable — nothing does.
+#
+# 2. The notification hub sets AllowStatefulReconnects, which buffers
+#    per-connection state in pod memory. The backplane does not replicate that
+#    buffer either, so a reconnect landing on a different pod silently loses it.
+#
+# Affinity is deliberately absent from /api: those requests are stateless and
+# pinning them would concentrate load for no benefit. It is configured even on a
+# single-replica install, where it is inert — so that scaling up is a
+# replica-count change and not a debugging session.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tms-sticky
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+  {{- $sticky := include "tms.ingress.stickyAnnotations" . }}
+  {{- if or $sticky .Values.commonAnnotations }}
+  annotations:
+    {{- with $sticky }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ .Values.hostname | quote }}
+      secretName: {{ .Values.tls.secretName }}
+  rules:
+    - host: {{ .Values.hostname | quote }}
+      http:
+        paths:
+          # SignalR notification hub — served by the API.
+          - path: /hubs
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          # Blazor Server circuit — served by the web host.
+          - path: /_blazor
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-web
+                port:
+                  number: 80

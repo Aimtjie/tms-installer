@@ -1,0 +1,108 @@
+{{- include "tms.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tms-config
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+# Non-secret runtime configuration for the API and Web pods.
+#
+# Secrets — the database password, the JWT signing key, the blind-index key, the
+# Keycloak admin credentials — live in the Secret named by secrets.existingSecret
+# and are referenced individually by each Deployment.
+data:
+  ASPNETCORE_ENVIRONMENT: Production
+
+  # ── Single origin ───────────────────────────────────────────────
+  # Web, API and Keycloak share one hostname on different paths, so the browser
+  # never makes a cross-origin request. That removes CORS from the picture
+  # entirely and means one DNS record and one certificate.
+  #
+  #   https://HOST/        web
+  #   https://HOST/api/    API
+  #   https://HOST{{ include "tms.keycloak.path" . }}/   Keycloak
+  #
+  # All three of the values below are enforced by fail-fast guards in the API
+  # outside Development — a blank or non-absolute value stops the pod at startup
+  # rather than failing later at sign-in. Sso__WebRedirectBaseUrl must stay a
+  # SINGLE origin; a comma-separated list fails the absolute-URL guard.
+  Cors__WebOrigin: https://{{ .Values.hostname }}
+  Sso__WebRedirectBaseUrl: https://{{ .Values.hostname }}
+  Keycloak__PublicBaseUrl: {{ include "tms.keycloak.publicUrl" . | quote }}
+
+  # In-cluster address the API uses to reach Keycloak directly, not via the
+  # ingress.
+  #
+  # The path prefix here is REQUIRED and must match KC_HTTP_RELATIVE_PATH on the
+  # Keycloak pod. Both are rendered from tms.keycloak.path for that reason.
+  # These calls are server-to-server and never pass through the ingress, so
+  # nothing adds the prefix for them — without it every token exchange resolves
+  # to /realms/... which Keycloak 404s, and signing in becomes impossible. The
+  # failure is invisible to the probes: Keycloak's management interface is
+  # pinned to "/" separately, so it reports healthy throughout. (TMS #1217.)
+  Keycloak__BaseUrl: {{ include "tms.keycloak.internalUrl" . | quote }}
+  Keycloak__ClientId: tms-api
+  Keycloak__Realm: tms
+
+  # ── Tokens ──────────────────────────────────────────────────────
+  Jwt__Issuer: tms-api
+  Jwt__Audience: tms-web
+  Jwt__ExpiryMinutes: "15"
+  Jwt__RefreshTokenExpiryDays: "7"
+
+  # ── Attachments ─────────────────────────────────────────────────
+  # Anything other than the literal "S3" resolves to the local provider, which
+  # is why attachments.provider is validated at install rather than trusted.
+  Storage__Provider: Local
+  Storage__Local__BasePath: {{ .Values.attachments.path | quote }}
+
+  # ── Proxy trust ─────────────────────────────────────────────────
+  # Which peers may set X-Forwarded-For and X-Forwarded-Proto, so that
+  # Request.IsHttps, HSTS and Secure cookies behave correctly behind TLS
+  # termination at the ingress.
+  #
+  # Setting this REPLACES the default (all RFC1918) rather than adding to it.
+  # That is the point: on an internal deployment the end users are themselves
+  # RFC1918 hosts, so the default would let any workstation on the network spoof
+  # X-Forwarded-For and defeat per-IP rate limiting.
+  {{- if .Values.network.trustedProxyCidrs }}
+  {{- range $i, $cidr := .Values.network.trustedProxyCidrs }}
+  RateLimiting__TrustedProxyCidrs__{{ $i }}: {{ $cidr | quote }}
+  {{- end }}
+  {{- else }}
+  # network.trustProxyRfc1918 is set, so no explicit list is rendered and the
+  # API falls back to trusting all private ranges.
+  {{- end }}
+
+  # ── Behaviour ───────────────────────────────────────────────────
+  Tickets__NumberPrefix: {{ .Values.tickets.numberPrefix | quote }}
+  Regions__Default: {{ .Values.regions.default | quote }}
+
+  # The first administrator is created through the /setup wizard on first visit.
+  # There are no seeded accounts.
+  DemoSeeder__Enabled: "false"
+
+  # Whether the API may reconcile a squashed migration history on startup.
+  #
+  # Off by default outside Development, which is the safe posture for a database
+  # holding your data: it means an upgrade whose migration history does not line
+  # up STOPS, rather than rewriting history on its own. If a release note tells
+  # you an upgrade needs it, set migrations.autoReconcileSquash=true for that
+  # upgrade and put it back afterwards.
+  Migrations__AutoReconcileSquash: {{ .Values.migrations.autoReconcileSquash | quote }}
+
+  # Must stay >= Import:MaxFileSizeBytes + Import:MaxArchiveBytes, and the
+  # ingress body-size cap must not be lower — a manifest CSV and its companion
+  # archive share a single multipart body, so a lower value anywhere truncates
+  # imports rather than rejecting them cleanly. Both are rendered from
+  # tms.maxRequestBodyBytes.
+  Kestrel__Limits__MaxRequestBodySize: {{ include "tms.maxRequestBodyBytes" . | quote }}
+
+  # Deliberately empty. The upstream default embeds an analytics token for a
+  # domain you do not own, which would send your traffic data somewhere
+  # unexpected.
+  CloudflareAnalytics__Token: ""

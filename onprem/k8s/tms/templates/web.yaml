@@ -1,0 +1,162 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tms-web
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "web") | nindent 4 }}
+spec:
+  selector:
+    {{- include "tms.selectorLabels" (dict "component" "web") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tms-web
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "web") | nindent 4 }}
+spec:
+  # Safe to raise, unlike the API. The web host keeps no per-instance state that
+  # matters: its DataProtection keys live in the database, and Blazor Server
+  # circuits are pinned to a pod by the cookie affinity on the sticky Ingress.
+  #
+  # It therefore keeps the default RollingUpdate strategy — a brief surge to
+  # replicas+1 during a rollout is harmless here, which is exactly what is NOT
+  # true of the API.
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tms.selectorLabels" (dict "component" "web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tms.labels" . | nindent 8 }}
+        {{- include "tms.selectorLabels" (dict "component" "web") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-tms-config.yaml") . | sha256sum }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- /* Operator values win; ours fill the gaps. Emitting the ids AFTER a
+               toYaml of .Values.podSecurityContext looked equivalent and was not:
+               on a duplicate key the last one wins, so the documented override
+               was silently discarded. */ -}}
+        {{- toYaml (merge (deepCopy .Values.podSecurityContext) (dict "runAsUser" 1654 "runAsGroup" 1654 "fsGroup" 1654)) | nindent 8 }}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- if gt (int .Values.web.replicas) 1 }}
+      # Spread across nodes once there is more than one, so a node loss costs a
+      # reconnect rather than the whole front end.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "tms.selectorLabels" (dict "component" "web") | nindent 14 }}
+      {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        {{- include "tms.pg.caVolume" . | nindent 8 }}
+      containers:
+        - name: web
+          image: {{ include "tms.image" .Values.images.web }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: tms-config
+          env:
+            # What the BROWSER is told to call. The same origin as the web app
+            # itself, because the ingress path-routes /api to the API service —
+            # so the WASM client's /bff/api-config returns a same-origin base and
+            # no cross-origin request is ever made.
+            - name: ApiService__BaseUrl
+              value: https://{{ .Values.hostname }}
+            - name: SignalR__Transport
+              value: WebSockets
+            # Server-side calls from the Blazor Server circuit to the API, over
+            # the cluster network rather than back out through the ingress.
+            - name: services__apiservice__http__0
+              value: http://tms-api
+
+            # The web host keeps its own DataProtection key ring in the same
+            # database, under a separate application name — so it needs the
+            # connection string too, not just the API.
+            - name: TMS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tms.pg.secretName" . }}
+                  key: {{ include "tms.pg.secretKey" . }}
+            - name: ConnectionStrings__ticketdb
+              value: {{ include "tms.pg.npgsql" . | quote }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+            {{- include "tms.pg.caVolumeMount" . | nindent 12 }}
+          # The web host waits for the API to create the DataProtection table
+          # before it can start, so its startup window is as generous as the
+          # API's. 40 x 15s = 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            failureThreshold: 12
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}

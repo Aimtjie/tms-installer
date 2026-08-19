@@ -1,0 +1,65 @@
+TMS {{ .Chart.AppVersion }} is installing into namespace {{ .Release.Namespace }}.
+
+  Web        https://{{ .Values.hostname }}/
+  API        https://{{ .Values.hostname }}/api
+  Sign-in    https://{{ .Values.hostname }}{{ include "tms.keycloak.path" . }}
+
+First boot runs database migrations and warms every tenant's encryption key. It
+takes several minutes and the pods are deliberately not marked ready until it
+finishes. Watch it with:
+
+    kubectl -n {{ .Release.Namespace }} rollout status deployment/tms-api --timeout=15m
+
+Then open https://{{ .Values.hostname }}/ and complete the /setup wizard. It
+creates the first administrator. There are no seeded accounts.
+
+
+THREE THINGS TO WRITE DOWN NOW
+──────────────────────────────
+
+1. Attachments are NOT backed up by anything in this chart.
+
+   They live on the PersistentVolumeClaim `tms-attachments`, on StorageClass
+   `{{ .Values.storage.className }}`. That is the only copy. If your platform
+   does not snapshot that class, arrange it — a database backup restores every
+   ticket and none of their files.
+
+2. Encryption__BlindIndexSecret can never change.
+
+   It derives the searchable index over encrypted fields. Change it and every
+   user becomes unfindable and sign-in stops working, with no migration path.
+   A database backup is only restorable alongside the value it was taken with.
+   Keep it somewhere that is not this cluster.
+
+3. tms-api runs exactly one replica, and this chart can only refuse a scale that
+   goes through Helm.
+{{ if .Values.apiScaleGuard.enabled }}
+   You have apiScaleGuard enabled, so `kubectl scale` is refused too.
+{{- else }}
+   `kubectl scale deployment/tms-api --replicas=2` would succeed and would send
+   your customers duplicate scheduled reports. If you are cluster-admin, set
+   apiScaleGuard.enabled=true to have the cluster refuse it.
+{{- end }}
+
+{{ if not .Values.redis.enabled }}
+NOTE: redis.enabled=false, so real-time notifications are held in one pod's
+memory. That is correct at web.replicas=1 and breaks silently above it.
+{{- end }}
+{{- if .Values.network.trustProxyRfc1918 }}
+
+NOTE: network.trustProxyRfc1918=true. The API trusts forwarded headers from any
+private address, which on an internal deployment includes your users'
+workstations. Narrow it to your pod CIDR via network.trustedProxyCidrs when you
+can determine it.
+{{- end }}
+{{- if eq .Values.postgres.sslMode "disable" }}
+
+WARNING: postgres.sslMode=disable — traffic to your database, including every
+credential and every ticket body, is in clear text on your network.
+{{- else if eq .Values.postgres.sslMode "require" }}
+
+NOTE: postgres.sslMode=require encrypts the database connection but does NOT
+verify the server's identity. Use verify-ca or verify-full where you can.
+{{- end }}
+
+Operational procedures are in docs/RUNBOOK.md next to this chart.

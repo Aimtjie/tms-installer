@@ -1,0 +1,282 @@
+# TMS — configuration for a cluster you already run.
+#
+# Everything you MUST decide is in the first section. Everything below it has a
+# working default. `values.example.yaml` next to this chart contains only the
+# first section, ready to fill in.
+#
+# A value left blank in the first section stops `helm install` with an
+# explanation. Nothing is guessed on your behalf.
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  REQUIRED
+# ═══════════════════════════════════════════════════════════════════════════
+
+# The one hostname TMS is served from. Web at /, the API at /api, sign-in at
+# /auth — one DNS record, one certificate, and because the browser only ever
+# talks to one origin, no CORS to configure.
+hostname: ""                       # e.g. tickets.example.internal
+
+tls:
+  # An EXISTING kubernetes.io/tls Secret in the release namespace whose
+  # certificate covers `hostname`, with the full chain.
+  #
+  # This chart does not require cert-manager and does not renew anything.
+  # Whoever issued the certificate owns renewing it.
+  secretName: ""                   # e.g. tms-tls
+
+ingress:
+  # `kubectl get ingressclass`
+  className: ""                    # e.g. nginx
+
+  # Which annotation preset to render. `nginx` emits the ingress-nginx
+  # annotations TMS needs; `none` emits none and leaves it to you, in which
+  # case read README section 4 — the requirements are real, not stylistic, and
+  # a controller that does not meet them breaks sign-in and file imports rather
+  # than looking untidy.
+  controller: nginx                # nginx | none
+
+storage:
+  # StorageClass for the attachment volume. ReadWriteOnce is sufficient.
+  #
+  # ⚠ NOTHING IN THIS CHART BACKS THIS UP. Uploaded files live here and in no
+  #   other place. Confirm your platform snapshots this StorageClass.
+  className: ""                    # e.g. ceph-rbd, nfs-client, gp3
+  size: 20Gi
+
+# Your PostgreSQL server. This chart never installs a database.
+#
+# Two databases are required, and a role that can log in to both. See README
+# section 2 for the exact SQL to hand your DBA.
+postgres:
+  host: ""                         # e.g. postgres.example.internal
+  port: 5432
+
+  # The role that owns both databases below.
+  username: tms
+  database: ticketdb
+  keycloakDatabase: keycloakdb
+
+  # disable | require | verify-ca | verify-full
+  #
+  # NOTE these are a real security choice, not spellings of one another. Since
+  # Npgsql 8, `require` means "encrypt, but do not check who you are talking
+  # to" — matching libpq. Only the `verify-*` modes authenticate the server.
+  sslMode: verify-full
+
+  # A Secret holding your database server's CA certificate, for the verify-*
+  # modes. Mounted read-only at /etc/postgres-tls/ca.crt on the API, Web and
+  # Keycloak pods. Leave blank and NO certificate volume is created at all.
+  caSecretName: ""
+  caSecretKey: ca.crt
+
+  # Set true instead of caSecretName when the server presents a publicly
+  # trusted certificate, to verify against the container image's CA bundle.
+  trustSystemCaStore: false
+
+  # By default Keycloak reuses the role above. Set these only if your DBA
+  # policy requires the identity store to have its own credentials.
+  keycloak:
+    username: ""                   # blank ⇒ reuse postgres.username
+    existingSecret: ""             # blank ⇒ reuse the main password Secret
+    existingSecretKey: password
+
+network:
+  # The CIDR that ingress traffic reaches your pods from — usually the cluster
+  # pod CIDR. `kubectl get pod -n <ingress-namespace> -o wide` and match it
+  # against your cluster's pod network.
+  #
+  # ⚠ SETTING THIS REPLACES THE DEFAULT, IT DOES NOT ADD TO IT.
+  #
+  # It decides which peers may set X-Forwarded-For and X-Forwarded-Proto. Get
+  # it wrong and the API does not believe it is behind TLS: the first-run
+  # /setup wizard returns 500 on antiforgery, secure cookies and HSTS stop
+  # behaving, and per-IP rate limiting can be defeated by a spoofed header.
+  trustedProxyCidrs: []            # e.g. ["10.244.0.0/16"]
+
+  # If you genuinely cannot determine the CIDR, set this true to fall back to
+  # trusting all RFC1918 ranges. It is a deliberate keystroke because on an
+  # internal deployment your users are themselves on RFC1918 addresses, so this
+  # trusts them to set their own forwarded headers.
+  trustProxyRfc1918: false
+
+secrets:
+  # A Secret you create before installing — see README section 3. This chart
+  # generates no secret material of its own, on purpose: Encryption__BlindIndex
+  # Secret can never change once data exists, and every Helm idiom for
+  # generating-and-remembering a value silently produces a NEW one during
+  # `helm template`, `--dry-run`, or any render without cluster access.
+  existingSecret: tms-secrets
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Everything below has a working default
+# ═══════════════════════════════════════════════════════════════════════════
+
+images:
+  # Public on GHCR — anonymous pull, no pull secret, nothing that expires.
+  # That is deliberate: a credential that needs renewing is a scheduled outage
+  # at a site nobody can reach.
+  #
+  # `digest` wins over `tag` when both are set. The release packaging pins
+  # digests here; a source checkout runs tags.
+  api:
+    repository: ghcr.io/aimtjie/tms-api
+    tag: latest
+    digest: ""
+  web:
+    repository: ghcr.io/aimtjie/tms-web
+    tag: latest
+    digest: ""
+  keycloak:
+    repository: quay.io/keycloak/keycloak
+    tag: "26.5.6"
+    digest: "sha256:8d44614c74798322c4e07fbe0ecb15cfbb5879d69b484628555f58ade06f0d8c"
+  redis:
+    repository: redis
+    tag: 7.4-alpine
+    digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+api:
+  # THE ONLY SUPPORTED VALUE IS 1, and `helm install` refuses anything else.
+  #
+  # The scheduled-report runner, both inbound-mail pollers, the SLA monitor and
+  # the import recovery sweep have no leader election. A second replica emails
+  # your customers duplicate scheduled reports, double-processes inbound mail,
+  # and its import recovery sweep adopts the batch the other replica is still
+  # writing. Tracked in TMS #1173 Track 2.
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+web:
+  # Safe to raise. The web host keeps no per-instance state that matters — its
+  # DataProtection keys live in the database, and Blazor Server circuits are
+  # pinned to a pod by the cookie affinity on the sticky Ingress.
+  replicas: 1
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+keycloak:
+  # The path Keycloak is served under. Changing it moves the sign-in path AND
+  # the in-cluster URL the API calls — both derive from this one value, because
+  # a mismatch 404s every token exchange while Keycloak still reports healthy.
+  relativePath: /auth
+  realm:
+    # Supply your own realm ConfigMap instead of the one this chart renders.
+    # It must contain a key named tms-realm.json.
+    existingConfigMap: ""
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: 500m, memory: 1Gi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+
+redis:
+  # Carries the SignalR backplane and nothing else. It holds no data worth
+  # keeping.
+  #
+  # Be clear about what it does TODAY: the notification hub is hosted only by
+  # tms-api, and api.replicas is pinned to 1, so there is no second pod for the
+  # backplane to reach and it is inert. It is deployed and WIRED anyway, so that
+  # when the single-replica restriction lifts, scaling is a value change rather
+  # than a new component to introduce into a running client system.
+  #
+  # "and wired" is the distinction that matters: the k3s target deploys Redis and
+  # never gives the API a connection string, so scaling up would not have worked
+  # there either (TMS #1759).
+  #
+  # Setting this false is reasonable if you would rather not run a pod that does
+  # nothing yet. Redis__Password then becomes unnecessary in your Secret.
+  enabled: true
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+  nodeSelector: {}
+  tolerations: []
+
+migrations:
+  # Whether the API may reconcile a squashed migration history at startup.
+  #
+  # False is the safe posture for a database holding your data: an upgrade whose
+  # migration history does not line up STOPS, rather than rewriting history by
+  # itself. Turn it on only when a release note for a specific upgrade says to,
+  # and turn it back off afterwards.
+  autoReconcileSquash: false
+
+attachments:
+  # `local` is the only provider these manifests implement. The value is
+  # validated rather than trusted, because the application falls back to local
+  # storage for any unrecognised value rather than refusing — so a typo here
+  # would quietly write files to a disk you believe is object storage, and you
+  # would find out at restore time.
+  provider: local
+  path: /var/tms/attachments
+
+tickets:
+  # Prefix on generated ticket numbers.
+  numberPrefix: SS
+
+regions:
+  # Default region code for new tenants.
+  default: ZA
+
+# Merged over the rendered preset. Later keys win, so you can override any
+# annotation this chart sets as well as add your own.
+ingressAnnotations: {}
+ingressStickyAnnotations: {}
+
+preflight:
+  # A Job that runs before anything is deployed and proves your database is
+  # reachable, both databases exist, the credentials work and the negotiated
+  # TLS matches postgres.sslMode.
+  #
+  # Worth keeping on. Without it, a wrong connection detail presents as every
+  # pod crash-looping at once with the real cause several hundred log lines
+  # deep in three different components.
+  enabled: true
+  image:
+    repository: ghcr.io/cloudnative-pg/postgresql
+    tag: "17.6"
+    digest: ""
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+
+apiScaleGuard:
+  # A ValidatingAdmissionPolicy that stops `kubectl scale deployment/tms-api`,
+  # an HPA, or a GitOps drift correction from raising the replica count after
+  # install. This chart's other defences only cover `helm install` and
+  # `helm upgrade`.
+  #
+  # OFF by default because the policy is a CLUSTER-SCOPED resource, and this
+  # chart does not assume you are cluster-admin. Turn it on if you are.
+  # Requires Kubernetes 1.30+.
+  enabled: false
+
+# Pod-level security context applied to every workload.
+#
+# Anything set here WINS over the chart's defaults, including runAsUser,
+# runAsGroup and fsGroup - which is what a cluster with a restricted PodSecurity
+# profile and a pinned uid range needs. (An earlier version emitted the ids after
+# this block, so on a duplicate key the chart's value won and the override was
+# silently discarded.)
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+commonLabels: {}
+commonAnnotations: {}

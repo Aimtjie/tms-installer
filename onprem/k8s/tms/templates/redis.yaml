@@ -1,0 +1,136 @@
+{{- if .Values.redis.enabled }}
+---
+# Redis carries the SignalR backplane and nothing else.
+#
+# It holds no data worth keeping: losing it drops in-flight real-time
+# notifications between replicas and the clients reconnect. Deliberately no
+# persistence, no Sentinel, no clustering — a highly-available Redis would add
+# more failure modes than the one it protects against.
+#
+# It is INERT today, and worth saying so plainly: the notification hub is hosted
+# ONLY by tms-api (ApiService/Program.cs MapHub), and api.replicas is pinned to
+# 1, so there is no second pod for the backplane to reach. tms-web hosts no hub.
+#
+# It is deployed and WIRED anyway, so that lifting that restriction later is a
+# value change rather than a new component introduced into a running client
+# system. "And wired" is the distinction that matters: the k3s target deploys
+# Redis and never gives the API a connection string, so scaling up would not
+# have worked there either (TMS #1759).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "redis") | nindent 4 }}
+spec:
+  selector:
+    {{- include "tms.selectorLabels" (dict "component" "redis") | nindent 4 }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "redis") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "tms.selectorLabels" (dict "component" "redis") | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "tms.labels" . | nindent 8 }}
+        {{- include "tms.selectorLabels" (dict "component" "redis") | nindent 8 }}
+      {{- with .Values.commonAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The default eviction timeout for an unreachable node is 5 minutes. For a
+      # component that holds no state and is cheap to restart, that is 5 minutes
+      # of degraded real-time updates for no reason.
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+        {{- with .Values.redis.tolerations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.redis.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- /* Operator values win; ours fill the gaps. Emitting the ids AFTER a
+               toYaml of .Values.podSecurityContext looked equivalent and was not:
+               on a duplicate key the last one wins, so the documented override
+               was silently discarded. */ -}}
+        {{- toYaml (merge (deepCopy .Values.podSecurityContext) (dict "runAsUser" 999 "runAsGroup" 999 "fsGroup" 999)) | nindent 8 }}
+      volumes:
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+      containers:
+        - name: redis
+          image: {{ include "tms.image" .Values.images.redis }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          # --save "" disables snapshotting entirely. There is nothing here worth
+          # writing to disk.
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Redis__Password
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+{{- end }}

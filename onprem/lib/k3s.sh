@@ -397,6 +397,31 @@ target_cert_replace() {
 }
 
 # ── nodes ───────────────────────────────────────────────────────────
+# Moved out of tmsctl so that every target answers these through its own
+# adapter rather than through k3s-shaped text printed for everyone (TMS #1762
+# review). The wording is unchanged from what tmsctl printed before.
+target_restore() {
+    [ -n "${1:-}" ] || die "Usage: tmsctl restore <snapshot-id>   (list them with: tmsctl backup list)"
+    confirm_destructive "About to REPLACE all current data with snapshot $1.
+Anything created since that snapshot will be lost."
+    say ''
+    say 'Restore is a documented procedure rather than a single command, because'
+    say 'the order matters: secrets first, then the database, then verification.'
+    say 'Restoring the database without its matching encryption secrets leaves'
+    say 'the data unreadable.'
+    say ''
+    say "Follow docs/RUNBOOK.md section 6.3, using snapshot: ${1:-<snapshot-id>}"
+}
+
+target_verify_recovery() {
+    say 'Checking that the restored data is actually usable ...'
+    say ''
+    say 'This confirms the encryption keys match the data - a database restored'
+    say 'without its matching secrets looks fine until someone tries to log in.'
+    say ''
+    say 'See docs/RUNBOOK.md section 6.4.'
+}
+
 target_node() {
     case "${1:-}" in
         drain)

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tms-attachments
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+  annotations:
+    # Survive `helm uninstall`.
+    #
+    # Helm deletes PVCs it created. Every file anyone has ever attached to a
+    # ticket is on this volume, and NOTHING IN THIS CHART BACKS IT UP — so an
+    # uninstall would be the only deletion, with no second copy anywhere.
+    #
+    # The cost of keeping it is an orphaned PVC after a deliberate teardown,
+    # which is visible and reversible. Removing it manually is documented in
+    # docs/UNINSTALL.md.
+    helm.sh/resource-policy: keep
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    # Sufficient while tms-api runs a single replica, which is the only
+    # supported configuration today. If that changes, this must become
+    # ReadWriteMany or move to object storage — a second API pod on another node
+    # cannot mount a ReadWriteOnce volume.
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.storage.size }}
+  storageClassName: {{ .Values.storage.className | quote }}

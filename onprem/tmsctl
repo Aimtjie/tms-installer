@@ -15,25 +15,7 @@ TMS_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 export TMS_ROOT
 
 TMS_ENV_FILE=${TMS_ENV_FILE:-$TMS_ROOT/.env}
-TMS_KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
-export TMS_ENV_FILE TMS_KUBECONFIG
-
-# #1256 — every operational command reads cluster state through the k3s
-# kubeconfig, which bootstrap deliberately creates root-only on a client server
-# (--write-kubeconfig-mode=600). Run unprivileged it would hang/fail on an
-# unreadable file after printing a header — the confusing symptom a real operator
-# hit. Re-exec under sudo so both `tmsctl ...` (via the installed PATH wrapper)
-# and `./tmsctl ...` (straight from the install tree, as the READMEs show) work
-# as documented. Skipped when already root or when the config is readable (an
-# explicit KUBECONFIG override, or a differently-permissioned target).
-if [ "$(id -u)" -ne 0 ] && [ -e "$TMS_KUBECONFIG" ] && [ ! -r "$TMS_KUBECONFIG" ]; then
-    if command -v sudo >/dev/null 2>&1; then
-        exec sudo "$TMS_ROOT/tmsctl" "$@"
-    fi
-    echo "tmsctl: reading cluster status needs $TMS_KUBECONFIG, which is root-only on" >&2
-    echo "        this server, and sudo is not available. Re-run this command as root." >&2
-    exit 1
-fi
+export TMS_ENV_FILE
 
 # shellcheck source=lib/common.sh
 . "$TMS_ROOT/lib/common.sh"
@@ -41,6 +23,37 @@ fi
 TMS_TARGET=$(env_get TMS_TARGET k3s)
 TMS_NAMESPACE=$(env_get K8S_NAMESPACE tms)
 export TMS_TARGET TMS_NAMESPACE
+
+# Where the kubeconfig lives — and whether reading it needs root — is a property
+# of the TARGET, so this has to come after TMS_TARGET is known. It used to run
+# first and assume the k3s answer for everyone.
+if [ "$TMS_TARGET" = k3s ]; then
+    TMS_KUBECONFIG=${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
+
+    # #1256 — every operational command reads cluster state through the k3s
+    # kubeconfig, which bootstrap deliberately creates root-only on a client server
+    # (--write-kubeconfig-mode=600). Run unprivileged it would hang/fail on an
+    # unreadable file after printing a header — the confusing symptom a real operator
+    # hit. Re-exec under sudo so both `tmsctl ...` (via the installed PATH wrapper)
+    # and `./tmsctl ...` (straight from the install tree, as the READMEs show) work
+    # as documented. Skipped when already root or when the config is readable (an
+    # explicit KUBECONFIG override, or a differently-permissioned target).
+    if [ "$(id -u)" -ne 0 ] && [ -e "$TMS_KUBECONFIG" ] && [ ! -r "$TMS_KUBECONFIG" ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            exec sudo "$TMS_ROOT/tmsctl" "$@"
+        fi
+        echo "tmsctl: reading cluster status needs $TMS_KUBECONFIG, which is root-only on" >&2
+        echo "        this server, and sudo is not available. Re-run this command as root." >&2
+        exit 1
+    fi
+else
+    # On a cluster we did not install, the operator has their own kubeconfig and
+    # may deliberately not be cluster-admin. Escalating to root here would be both
+    # wrong and useless: root's kubeconfig is not theirs, so `sudo tmsctl status`
+    # would report on nothing at all.
+    TMS_KUBECONFIG=${KUBECONFIG:-$HOME/.kube/config}
+fi
+export TMS_KUBECONFIG
 
 usage() {
     cat <<'EOF'
@@ -71,9 +84,13 @@ EOF
 # Load the implementation for whichever target is installed. Only k3s is
 # implemented here; the others report that plainly rather than half-working.
 case "$TMS_TARGET" in
-    k3s|k8s)
+    k3s)
         # shellcheck source=lib/k3s.sh
         . "$TMS_ROOT/lib/k3s.sh"
+        ;;
+    k8s)
+        # shellcheck source=lib/k8s.sh
+        . "$TMS_ROOT/lib/k8s.sh"
         ;;
     compose|swarm)
         unsupported() {
@@ -82,7 +99,8 @@ Implemented for k3s; compose and swarm adapters are tracked separately.
 For now use the docker commands documented in $TMS_ROOT/$TMS_TARGET/README.md."
         }
         for _cmd in target_status target_logs target_backup target_support_bundle \
-                    target_cert_replace target_node target_update; do
+                    target_cert_replace target_node target_update target_restore \
+                    target_verify_recovery; do
             eval "$_cmd() { unsupported \"\${TMS_SUBCOMMAND:-command}\"; }"
         done
         ;;
@@ -109,16 +127,7 @@ case "$TMS_SUBCOMMAND" in
         ;;
 
     restore)
-        [ -n "${1:-}" ] || die "Usage: tmsctl restore <snapshot-id>   (list them with: tmsctl backup list)"
-        confirm_destructive "About to REPLACE all current data with snapshot $1.
-Anything created since that snapshot will be lost."
-        say ''
-        say 'Restore is a documented procedure rather than a single command, because'
-        say 'the order matters: secrets first, then the database, then verification.'
-        say 'Restoring the database without its matching encryption secrets leaves'
-        say 'the data unreadable.'
-        say ''
-        say "Follow docs/RUNBOOK.md section 6.3, using snapshot: $1"
+        target_restore "$@"
         ;;
 
     cert)
@@ -176,15 +185,22 @@ This is refused deliberately rather than warned about."
         ;;
 
     verify-recovery)
-        say 'Checking that the restored data is actually usable ...'
-        say ''
-        say 'This confirms the encryption keys match the data — a database restored'
-        say 'without its matching secrets looks fine until someone tries to log in.'
-        say ''
-        say 'See docs/RUNBOOK.md section 6.4.'
+        target_verify_recovery "$@"
         ;;
 
     preflight)
+        [ "$TMS_TARGET" = k8s ] && die "preflight checks this machine's CPU, memory, disk and ports, which say nothing
+about a cluster you already run.
+
+The equivalent for this target runs inside the cluster, as part of installing:
+a Job proves your database is reachable, that both databases exist, that the
+credentials work and that the negotiated TLS matches what you asked for.
+
+    helm template tms ./tms -n $TMS_NAMESPACE -f your-values.yaml | less
+    helm install  tms ./tms -n $TMS_NAMESPACE -f your-values.yaml
+
+The prerequisites your platform team should confirm first are in
+$TMS_ROOT/k8s/README.md section 2."
         exec "$TMS_ROOT/common/preflight.sh" "$@"
         ;;
 
@@ -196,6 +212,10 @@ This is refused deliberately rather than warned about."
         ;;
 
     join)
+        [ "$TMS_TARGET" = k3s ] || die "'join' adds a server to a cluster tmsctl installed, which only applies to the k3s target.
+
+You are on the $TMS_TARGET target, where the cluster is yours. Add nodes to it
+however you normally do."
         [ -n "${1:-}" ] || die "Usage: tmsctl join <token>   (printed by 'tmsctl install' on the first server)"
         exec "$TMS_ROOT/k3s/bootstrap.sh" --join "$@"
         ;;

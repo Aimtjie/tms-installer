@@ -1,0 +1,103 @@
+{{- if not .Values.keycloak.realm.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+# The Keycloak realm, imported once on first start.
+#
+# This is a THIRD copy of a definition that already lives in
+# ticket-management-system.AppHost/Realms/tms-realm.json and, inline, in
+# k8s/base/keycloak-realm-configmap.yaml. That is a deliberate exception to the
+# project rule that there are exactly two, taken because the alternatives are
+# worse for a chart:
+#
+#   * Helm's .Files.Get cannot read outside the chart directory, so the k3s
+#     approach — resolve a sibling path at install time — is not available.
+#   * Injecting the file at packaging time makes `helm install` from a source
+#     checkout fail, and that packaging step is exactly the one that was
+#     forgotten for the k3s tarball (TMS #1760).
+#
+# The risk the two-copy rule exists to prevent is DRIFT, and drift is handled
+# here by a guard test that compares this realm against the AppHost one field by
+# field, ignoring redirectUris. CI will not let this copy diverge.
+#
+# redirectUris are REPLACED rather than appended, so this file can never name a
+# host the operator does not own. That also means it satisfies the publish
+# safety gate by construction rather than by a sanitiser running at the right
+# moment.
+data:
+  tms-realm.json: |
+    {
+      "realm": "tms",
+      "enabled": true,
+      "displayName": "Ticket Management System",
+      "sslRequired": "none",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "bruteForceProtected": true,
+      "clients": [
+        {
+          "clientId": "tms-api",
+          "enabled": true,
+          "publicClient": true,
+          "directAccessGrantsEnabled": true,
+          "standardFlowEnabled": false,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "protocol": "openid-connect"
+        },
+        {
+          "clientId": "tms-sso",
+          "enabled": true,
+          "publicClient": false,
+          "secret": "placeholder-overwritten-by-api-at-startup",
+          "directAccessGrantsEnabled": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "protocol": "openid-connect",
+          "redirectUris": [
+            "https://{{ .Values.hostname }}/api/auth/sso/callback"
+          ],
+          "webOrigins": ["+"],
+          "protocolMappers": [
+            {
+              "name": "aad-oid",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "aadObjectId",
+                "claim.name": "oid",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "false",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+      "roles": {
+        "realm": [
+          { "name": "Customer",           "composite": false },
+          { "name": "Agent",              "composite": false },
+          { "name": "Admin",              "composite": false },
+          { "name": "SuperAdmin",         "composite": false },
+          { "name": "Director",           "composite": false },
+          { "name": "SDM",                "composite": false },
+          { "name": "TeamLead",           "composite": false },
+          { "name": "ServiceCoordinator", "composite": false },
+          { "name": "SupportEngineer",    "composite": false },
+          { "name": "HelpdeskAgent",      "composite": false }
+        ]
+      }
+    }
+{{- end }}

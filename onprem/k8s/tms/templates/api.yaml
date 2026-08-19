@@ -1,0 +1,212 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tms-api
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "api") | nindent 4 }}
+spec:
+  selector:
+    {{- include "tms.selectorLabels" (dict "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tms-api
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "api") | nindent 4 }}
+spec:
+  # Exactly one. Anything else is refused at install — see _validate.tpl for the
+  # five background services that have no leader election.
+  replicas: {{ .Values.api.replicas }}
+  # Recreate, not the default RollingUpdate.
+  #
+  # This is load-bearing and easy to miss. With `replicas: 1` and the DEFAULT
+  # strategy, maxSurge is 25%, which rounds UP to 1 — so a second API pod runs
+  # alongside the old one during every single update. For the whole overlap
+  # window there are two report schedulers, two mailbox pollers, two SLA
+  # monitors, two import-recovery sweeps and two concurrent EF migrations. The
+  # replica count says one; the rollout gives you two.
+  #
+  # Recreate accepts a few seconds of downtime instead. On a single-replica
+  # deployment that is not a real loss: a rolling update of one pod already ends
+  # with a restart the user sees. (TMS #1758.)
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "tms.selectorLabels" (dict "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tms.labels" . | nindent 8 }}
+        {{- include "tms.selectorLabels" (dict "component" "api") | nindent 8 }}
+      annotations:
+        # Roll the pod when non-secret configuration changes. Without this a
+        # ConfigMap edit is applied to the volume but never read, because these
+        # values are consumed as environment variables at process start.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-tms-config.yaml") . | sha256sum }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- /* Operator values win; ours fill the gaps. Emitting the ids AFTER a
+               toYaml of .Values.podSecurityContext looked equivalent and was not:
+               on a duplicate key the last one wins, so the documented override
+               was silently discarded. */ -}}
+        {{- toYaml (merge (deepCopy .Values.podSecurityContext) (dict "runAsUser" 1654 "runAsGroup" 1654 "fsGroup" 1654)) | nindent 8 }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: attachments
+          persistentVolumeClaim:
+            claimName: tms-attachments
+        {{- include "tms.pg.caVolume" . | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "tms.image" .Values.images.api }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: tms-config
+          env:
+            # ── Database ────────────────────────────────────────────
+            # The password is injected as its own variable and referenced by
+            # $(TMS_DB_PASSWORD) in the connection string below. Kubernetes
+            # expands $(VAR) using variables declared EARLIER in this list, so
+            # the order here matters.
+            #
+            # Doing it this way means the password never passes through Helm.
+            # Helm records every rendered manifest — Secret contents included —
+            # in a Secret in this namespace, and keeps one per retained
+            # revision. A password interpolated at render time would live there
+            # for the life of the release.
+            - name: TMS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tms.pg.secretName" . }}
+                  key: {{ include "tms.pg.secretKey" . }}
+            - name: ConnectionStrings__ticketdb
+              value: {{ include "tms.pg.npgsql" . | quote }}
+
+            # ── Signing and encryption ──────────────────────────────
+            - name: Jwt__Secret
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Jwt__Secret
+            # Immutable once data exists. Changing it makes every user
+            # unfindable and sign-in stops working, with no migration path.
+            - name: Encryption__BlindIndexSecret
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Encryption__BlindIndexSecret
+
+            # ── Keycloak admin ──────────────────────────────────────
+            - name: Keycloak__AdminUsername
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Keycloak__AdminUsername
+            - name: Keycloak__AdminPassword
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Keycloak__AdminPassword
+
+            # Only needed for Microsoft Entra sign-in. Absent otherwise, and the
+            # API logs that it is skipping SSO client setup rather than failing.
+            - name: Sso__Keycloak__ClientSecret
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Sso__Keycloak__ClientSecret
+                  optional: true
+
+            {{- if .Values.redis.enabled }}
+            # ── SignalR backplane ───────────────────────────────────
+            # Same $(VAR) indirection as the database password.
+            - name: TMS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Redis__Password
+            - name: ConnectionStrings__redis
+              value: {{ include "tms.redis.connectionString" . | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+            - name: attachments
+              mountPath: {{ .Values.attachments.path }}
+            {{- include "tms.pg.caVolumeMount" . | nindent 12 }}
+          # startupProbe holds liveness and readiness off until boot finishes.
+          # First boot runs migrations and warms every tenant's encryption key,
+          # which on a modest node takes minutes — without this the liveness
+          # probe kills the pod mid-migration and it never converges.
+          # 40 x 15s = 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}

@@ -1,0 +1,63 @@
+{{- if .Values.apiScaleGuard.enabled }}
+{{- if not (semverCompare ">=1.30.0-0" .Capabilities.KubeVersion.Version) }}
+{{- fail (printf "\n\napiScaleGuard.enabled requires Kubernetes 1.30 or newer — this cluster reports %s.\n\nValidatingAdmissionPolicy reached v1 in 1.30. On an older cluster, set\napiScaleGuard.enabled=false; the chart's other defences still refuse a scale\nthrough `helm install` and `helm upgrade`, just not through `kubectl scale`.\n" .Capabilities.KubeVersion.Version) }}
+{{- end }}
+---
+# Stops tms-api being scaled after installation.
+#
+# The chart's other defences — values.schema.json and the `fail` in
+# _validate.tpl — only run when Helm runs. They do nothing about
+# `kubectl scale deployment/tms-api`, a HorizontalPodAutoscaler someone adds
+# later, or a GitOps controller reconciling a drifted replica count. This is the
+# only mechanism here that survives the install.
+#
+# CLUSTER-SCOPED, which is why it is off by default: this chart does not assume
+# the person installing it is cluster-admin.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ .Release.Name }}-tms-api-single-replica
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:   ["apps"]
+        apiVersions: ["v1"]
+        operations:  ["CREATE", "UPDATE"]
+        resources:   ["deployments", "deployments/scale"]
+  # Selects the request, NOT labels on the object. `kubectl scale` sends a Scale
+  # subresource whose synthesised object carries no labels, so an objectSelector
+  # on the binding cannot match it -- which made an earlier version of this policy
+  # inert against the exact command it exists to stop.
+  matchConditions:
+    - name: only-tms-api
+      expression: "request.name == 'tms-api'"
+  validations:
+    - expression: >-
+        (has(object.spec.replicas) ? object.spec.replicas : 1) <= 1
+      message: >-
+        tms-api runs exactly one replica. Five of its background services have no
+        leader election: a second replica emails customers duplicate scheduled
+        reports, double-processes inbound mail, and its import-recovery sweep
+        adopts the batch another replica is still writing. Tracked as TMS #1173
+        Track 2.
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ .Release.Name }}-tms-api-single-replica
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+spec:
+  policyName: {{ .Release.Name }}-tms-api-single-replica
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: [{{ .Release.Namespace }}]
+{{- end }}

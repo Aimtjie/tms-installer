@@ -1,0 +1,81 @@
+# TMS — fill this in, then install with it.
+#
+#     helm install tms ./tms -n tms --create-namespace -f values.example.yaml
+#
+# These are the only settings you must decide. Everything else has a working
+# default; see tms/values.yaml for the full surface.
+#
+# Blank values stop the install with an explanation rather than guessing.
+
+# The DNS name that points at your ingress controller. Web, API and sign-in all
+# live under it, so this is the only name TMS needs.
+hostname: tickets.example.internal
+
+tls:
+  # A kubernetes.io/tls Secret you have already created in the release
+  # namespace, covering `hostname` with its full chain.
+  #
+  #   kubectl -n tms create secret tls tms-tls \
+  #       --cert=fullchain.pem --key=privkey.pem
+  secretName: tms-tls
+
+ingress:
+  # kubectl get ingressclass
+  className: nginx
+  # `nginx` renders the ingress-nginx annotations TMS needs. Use `none` for any
+  # other controller and read README section 4 — the four requirements behind
+  # those annotations are functional.
+  controller: nginx
+
+storage:
+  # kubectl get storageclass
+  #
+  # ⚠ Nothing in this chart backs this volume up. Uploaded files live here and
+  #   nowhere else.
+  className: REPLACE-ME
+  size: 20Gi
+
+postgres:
+  # Your server. This chart never installs a database.
+  #
+  # Run this on it first:
+  #
+  #   CREATE ROLE tms LOGIN PASSWORD '...';
+  #   CREATE DATABASE ticketdb   OWNER tms;
+  #   CREATE DATABASE keycloakdb OWNER tms;
+  #
+  host: postgres.example.internal
+  port: 5432
+  username: tms
+  database: ticketdb
+  keycloakDatabase: keycloakdb
+
+  # disable | require | verify-ca | verify-full
+  # `require` encrypts WITHOUT checking who you are talking to.
+  sslMode: verify-full
+
+  # For the verify-* modes: a Secret holding your server's CA certificate.
+  #
+  #   kubectl -n tms create secret generic tms-db-ca \
+  #       --from-file=ca.crt=/path/to/ca.crt
+  #
+  # Leave blank and set trustSystemCaStore: true instead if your server presents
+  # a publicly trusted certificate.
+  caSecretName: tms-db-ca
+
+network:
+  # The CIDR your ingress controller reaches the TMS pods from — usually the
+  # cluster pod network.
+  #
+  #   kubectl get pod -n <ingress-namespace> -o wide
+  #
+  # ⚠ Setting this REPLACES the default, it does not add to it. Get it wrong and
+  #   the API stops believing it is behind TLS: the /setup wizard returns 500,
+  #   and per-IP rate limiting can be bypassed with a spoofed header.
+  trustedProxyCidrs:
+    - 10.244.0.0/16
+
+secrets:
+  # A Secret you create before installing — see README section 3.
+  # This chart generates no secret material.
+  existingSecret: tms-secrets

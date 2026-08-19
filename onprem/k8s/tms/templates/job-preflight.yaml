@@ -1,0 +1,222 @@
+{{- if .Values.preflight.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-preflight
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+  annotations:
+    # Runs BEFORE anything else is created or updated, and blocks the release if
+    # it fails.
+    #
+    # Without it, a wrong database detail presents as the API, Web and Keycloak
+    # pods all crash-looping at once, with the real cause several hundred lines
+    # into whichever log you happen to open first. Every check below maps to a
+    # specific thing an operator gets wrong on a first install.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    # Kept on failure so the logs can be read; removed once it passes.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "tms.labels" . | nindent 8 }}
+        app: tms-preflight
+    spec:
+      restartPolicy: Never
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- /* Operator values win; ours fill the gaps. Emitting the ids AFTER a
+               toYaml of .Values.podSecurityContext looked equivalent and was not:
+               on a duplicate key the last one wins, so the documented override
+               was silently discarded. */ -}}
+        {{- toYaml (merge (deepCopy .Values.podSecurityContext) (dict "runAsUser" 26 "runAsGroup" 26 "fsGroup" 26)) | nindent 8 }}
+      volumes:
+        {{- include "tms.pg.caVolume" . | nindent 8 }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      containers:
+        - name: preflight
+          image: {{ include "tms.image" .Values.preflight.image }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: PGHOST
+              value: {{ .Values.postgres.host | quote }}
+            - name: PGPORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: PGUSER
+              value: {{ .Values.postgres.username | quote }}
+            - name: PGSSLMODE
+              value: {{ include "tms.pg.sslModeLibpq" . | quote }}
+            {{- if include "tms.pg.mountsCa" . }}
+            - name: PGSSLROOTCERT
+              value: {{ include "tms.pg.caPath" . }}
+            {{- else if .Values.postgres.trustSystemCaStore }}
+            - name: PGSSLROOTCERT
+              value: system
+            {{- end }}
+            - name: PGCONNECT_TIMEOUT
+              value: "10"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tms.pg.secretName" . }}
+                  key: {{ include "tms.pg.secretKey" . }}
+            - name: TMS_APP_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: TMS_KC_DB
+              value: {{ .Values.postgres.keycloakDatabase | quote }}
+            - name: TMS_KC_USER
+              value: {{ include "tms.pg.keycloakUsername" . | quote }}
+            {{- if .Values.postgres.keycloak.existingSecret }}
+            - name: TMS_KC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tms.pg.keycloakSecretName" . }}
+                  key: {{ include "tms.pg.keycloakSecretKey" . }}
+            {{- end }}
+          volumeMounts:
+            {{- include "tms.pg.caVolumeMount" . | nindent 12 }}
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              fail() {
+                  echo ''
+                  echo "PREFLIGHT FAILED: $1"
+                  echo ''
+                  echo "$2"
+                  echo ''
+                  exit 1
+              }
+
+              echo "Checking ${PGHOST}:${PGPORT} as ${PGUSER} (sslmode=${PGSSLMODE})"
+
+              # 1. Reachable at all. Separates "wrong hostname" and "blocked by a
+              #    NetworkPolicy" from "wrong password", which look identical
+              #    once you are only reading application logs.
+              #    Deliberately probed with sslmode=prefer rather than the configured
+              #    mode. pg_isready honours PGSSLMODE, so under `require` against a
+              #    server with TLS switched off it fails - and attributing THAT to
+              #    reachability sends an operator hunting for NetworkPolicies and DNS
+              #    when the actual fix is one line of postgresql.conf. Caught on a real
+              #    cluster; the two are now reported separately because they have
+              #    nothing to do with each other.
+              if ! PGSSLMODE=prefer pg_isready -q -t 10; then
+                  fail "cannot reach PostgreSQL at ${PGHOST}:${PGPORT}" \
+              "Check, in this order:
+                * the hostname resolves from inside this cluster
+                * the port is correct and the server is listening on it
+                * no NetworkPolicy in this namespace blocks egress to it — a
+                  default-deny policy is the single most common cause, and it is
+                  invisible from the database's side"
+              fi
+              echo "  reachable"
+
+              # 2. TLS available. Asked separately now that we know the port answers,
+              #    so a failure here can only be about TLS.
+              case "$PGSSLMODE" in
+                  disable|prefer|allow) ;;
+                  *)
+                      if ! pg_isready -q -t 10; then
+                          fail "${PGHOST}:${PGPORT} is reachable but refused a TLS connection" \
+              "postgres.sslMode is '${PGSSLMODE}', and the server answered on the port but would
+              not negotiate TLS. That is a server-side setting, not a network problem:
+
+                * check ssl = on in postgresql.conf, and that the server can read its
+                  certificate and key
+                * check pg_hba.conf offers a hostssl line matching this client
+
+              Or, if this database is genuinely not meant to use TLS, say so explicitly
+              with postgres.sslMode=disable rather than leaving a setting that claims a
+              protection you do not have."
+                      fi
+                      echo "  TLS accepted (${PGSSLMODE})"
+                      ;;
+              esac
+
+              # 3. The application database, with the application role.
+              if ! psql -d "$TMS_APP_DB" -tAc 'SELECT 1' >/dev/null 2>/tmp/err; then
+                  fail "cannot connect to database '${TMS_APP_DB}' as '${PGUSER}'" \
+              "$(cat /tmp/err)
+
+              Expected setup:
+                CREATE ROLE ${PGUSER} LOGIN PASSWORD '...';
+                CREATE DATABASE ${TMS_APP_DB} OWNER ${PGUSER};"
+              fi
+              echo "  ${TMS_APP_DB} reachable as ${PGUSER}"
+
+              # 4. Keycloak's database. A separate database on the same server,
+              #    and the check most often missed — Keycloak is the component
+              #    that fails, so nobody looks at the database list.
+              TMS_KC_REPORTED_USER=$PGUSER
+              if [ -n "${TMS_KC_PASSWORD:-}" ]; then
+                  TMS_KC_REPORTED_USER=$TMS_KC_USER
+                  PGPASSWORD="$TMS_KC_PASSWORD" psql -U "$TMS_KC_USER" -d "$TMS_KC_DB" -tAc 'SELECT 1' \
+                      >/dev/null 2>/tmp/err \
+                      || fail "cannot connect to database '${TMS_KC_DB}' as '${TMS_KC_USER}'" \
+              "$(cat /tmp/err)
+
+              Keycloak is configured with its own role. Expected setup:
+                CREATE ROLE ${TMS_KC_USER} LOGIN PASSWORD '...';
+                CREATE DATABASE ${TMS_KC_DB} OWNER ${TMS_KC_USER};"
+              else
+                  psql -d "$TMS_KC_DB" -tAc 'SELECT 1' >/dev/null 2>/tmp/err \
+                      || fail "cannot connect to database '${TMS_KC_DB}' as '${PGUSER}'" \
+              "$(cat /tmp/err)
+
+              Keycloak keeps its own schema in its own database on the same
+              server, and shares this role. Expected setup:
+                CREATE DATABASE ${TMS_KC_DB} OWNER ${PGUSER};
+
+              If your policy requires a separate role for the identity store,
+              set postgres.keycloak.username and postgres.keycloak.existingSecret
+              instead."
+              fi
+              echo "  ${TMS_KC_DB} reachable as ${TMS_KC_REPORTED_USER}"
+
+              # 5. TLS actually negotiated.
+              #
+              #    Asked of the SERVER rather than inferred from the client
+              #    setting, because 'require' asks for encryption without
+              #    verifying anything and a misconfigured server can still leave
+              #    you unencrypted. Reading pg_stat_ssl for our own backend is
+              #    the only answer that is not a guess.
+              if [ "$PGSSLMODE" != "disable" ]; then
+                  ssl=$(psql -d "$TMS_APP_DB" -tAc \
+                      'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()' 2>/dev/null || echo '?')
+                  if [ "$ssl" != "t" ]; then
+                      fail "connected to '${TMS_APP_DB}' WITHOUT TLS, but postgres.sslMode is '${PGSSLMODE}'" \
+              "The server reported ssl='${ssl}' for this connection.
+
+              Either the server is not configured for TLS, or its pg_hba.conf is
+              matching a non-SSL rule for this client. Fix the server, or set
+              postgres.sslMode=disable to state plainly that this deployment
+              talks to its database in clear text."
+                  fi
+                  echo "  TLS negotiated (${PGSSLMODE})"
+              else
+                  echo "  TLS not requested (sslMode=disable)"
+              fi
+
+              echo ''
+              echo 'Preflight passed.'
+          resources:
+            {{- toYaml .Values.preflight.resources | nindent 12 }}
+{{- end }}

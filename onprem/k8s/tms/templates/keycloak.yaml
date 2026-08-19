@@ -1,0 +1,199 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "keycloak") | nindent 4 }}
+spec:
+  selector:
+    {{- include "tms.selectorLabels" (dict "component" "keycloak") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    # Health and metrics moved to their own port in Keycloak 25+. It is
+    # deliberately not exposed through the ingress.
+    - name: management
+      port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    {{- include "tms.labels" . | nindent 4 }}
+    {{- include "tms.selectorLabels" (dict "component" "keycloak") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "tms.selectorLabels" (dict "component" "keycloak") | nindent 6 }}
+  strategy:
+    # Keycloak imports its realm at startup against a shared database.
+    # Overlapping an old and a new instance during a rollout risks both touching
+    # the schema at once, so replace rather than overlap.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "tms.labels" . | nindent 8 }}
+        {{- include "tms.selectorLabels" (dict "component" "keycloak") | nindent 8 }}
+      annotations:
+        # Keycloak reads the realm ONLY at startup. Without this annotation a
+        # realm change updates the ConfigMap, the mounted file changes, and
+        # nothing re-reads it — the edit appears to have been applied and has
+        # not been.
+        {{- if .Values.keycloak.realm.existingConfigMap }}
+        checksum/realm: "supplied-externally"
+        {{- else }}
+        checksum/realm: {{ include (print $.Template.BasePath "/configmap-realm.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.images.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- /* Operator values win; ours fill the gaps. Emitting the ids AFTER a
+               toYaml of .Values.podSecurityContext looked equivalent and was not:
+               on a duplicate key the last one wins, so the documented override
+               was silently discarded. */ -}}
+        {{- toYaml (merge (deepCopy .Values.podSecurityContext) (dict "runAsUser" 1000 "runAsGroup" 1000 "fsGroup" 1000)) | nindent 8 }}
+      {{- with .Values.keycloak.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.keycloak.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.keycloak.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.keycloak.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      volumes:
+        - name: realm
+          configMap:
+            name: {{ .Values.keycloak.realm.existingConfigMap | default "keycloak-realm" }}
+        {{- include "tms.pg.caVolume" . | nindent 8 }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+      containers:
+        - name: keycloak
+          image: {{ include "tms.image" .Values.images.keycloak }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          # `start` without --optimized: the stock image has not been built for
+          # this database configuration, so it performs the build step on first
+          # boot. That is slow, which is what the generous startupProbe is for.
+          args:
+            - start
+            # --import-realm is what actually reads the realm mounted at
+            # /opt/keycloak/data/import. WITHOUT IT Keycloak starts perfectly
+            # happily, serves /health/ready, and has no tms realm — so the API's
+            # first admin call 404s, reference-data seeding throws, and tms-api
+            # crash-loops while every other pod reports healthy. Keycloak skips
+            # the import when the realm already exists, so this is safe on every
+            # restart, not just the first. (TMS #1236.)
+            - --import-realm
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            # Served under a path on the shared hostname, so the whole system
+            # needs one DNS record and one certificate.
+            #
+            # This value and Keycloak__BaseUrl in the tms-config ConfigMap are
+            # rendered from the SAME helper. They must agree: the API's admin and
+            # token calls are server-to-server and never pass through the
+            # ingress, so nothing adds the prefix for them.
+            - name: KC_HTTP_RELATIVE_PATH
+              value: {{ include "tms.keycloak.path" . | default "/" | quote }}
+            # Pin the management interface to the root explicitly. Whether it
+            # would otherwise inherit KC_HTTP_RELATIVE_PATH is version-dependent,
+            # and the probes below must not be guesswork.
+            - name: KC_HTTP_MANAGEMENT_RELATIVE_PATH
+              value: "/"
+            - name: KC_HOSTNAME
+              value: {{ include "tms.keycloak.publicUrl" . | quote }}
+            # TLS terminates at the ingress; Keycloak speaks plain HTTP inside
+            # the cluster and trusts the forwarded headers.
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_DB
+              value: postgres
+            # Same server and same TLS posture as the API's connection string,
+            # rendered from the same values through tms.pg.jdbc — the two are
+            # written in different languages and would otherwise drift.
+            - name: KC_DB_URL
+              value: {{ include "tms.pg.jdbc" . | quote }}
+            - name: KC_DB_USERNAME
+              value: {{ include "tms.pg.keycloakUsername" . | quote }}
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tms.pg.keycloakSecretName" . }}
+                  key: {{ include "tms.pg.keycloakSecretKey" . }}
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Keycloak__AdminUsername
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: Keycloak__AdminPassword
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+            {{- include "tms.pg.caVolumeMount" . | nindent 12 }}
+            - name: tmp
+              mountPath: /tmp
+          # First boot runs the build step and imports the realm, which on a
+          # modest node takes minutes. 40 x 15s = 10 minutes before liveness can
+          # fire.
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.keycloak.resources | nindent 12 }}

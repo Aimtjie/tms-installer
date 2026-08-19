@@ -1,0 +1,1335 @@
+# GENERATED — do not edit.
+#
+# helm template tms ./tms -n tms -f values.example.yaml
+#
+# Committed for two reasons: an operator can read what the chart actually
+# produces without installing helm, and the guard tests in
+# ticket-management-system.Tests/OnPremHelmChartGuardTests.cs assert over real
+# YAML rather than over Go template source. The chart-lint workflow re-renders
+# and fails on any diff, so this cannot drift from the templates.
+---
+---
+# Source: tms/templates/configmap-realm.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+# The Keycloak realm, imported once on first start.
+#
+# This is a THIRD copy of a definition that already lives in
+# ticket-management-system.AppHost/Realms/tms-realm.json and, inline, in
+# k8s/base/keycloak-realm-configmap.yaml. That is a deliberate exception to the
+# project rule that there are exactly two, taken because the alternatives are
+# worse for a chart:
+#
+#   * Helm's .Files.Get cannot read outside the chart directory, so the k3s
+#     approach — resolve a sibling path at install time — is not available.
+#   * Injecting the file at packaging time makes `helm install` from a source
+#     checkout fail, and that packaging step is exactly the one that was
+#     forgotten for the k3s tarball (TMS #1760).
+#
+# The risk the two-copy rule exists to prevent is DRIFT, and drift is handled
+# here by a guard test that compares this realm against the AppHost one field by
+# field, ignoring redirectUris. CI will not let this copy diverge.
+#
+# redirectUris are REPLACED rather than appended, so this file can never name a
+# host the operator does not own. That also means it satisfies the publish
+# safety gate by construction rather than by a sanitiser running at the right
+# moment.
+data:
+  tms-realm.json: |
+    {
+      "realm": "tms",
+      "enabled": true,
+      "displayName": "Ticket Management System",
+      "sslRequired": "none",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "bruteForceProtected": true,
+      "clients": [
+        {
+          "clientId": "tms-api",
+          "enabled": true,
+          "publicClient": true,
+          "directAccessGrantsEnabled": true,
+          "standardFlowEnabled": false,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "protocol": "openid-connect"
+        },
+        {
+          "clientId": "tms-sso",
+          "enabled": true,
+          "publicClient": false,
+          "secret": "placeholder-overwritten-by-api-at-startup",
+          "directAccessGrantsEnabled": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "serviceAccountsEnabled": false,
+          "protocol": "openid-connect",
+          "redirectUris": [
+            "https://tickets.example.internal/api/auth/sso/callback"
+          ],
+          "webOrigins": ["+"],
+          "protocolMappers": [
+            {
+              "name": "aad-oid",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "config": {
+                "user.attribute": "aadObjectId",
+                "claim.name": "oid",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "false",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+      "roles": {
+        "realm": [
+          { "name": "Customer",           "composite": false },
+          { "name": "Agent",              "composite": false },
+          { "name": "Admin",              "composite": false },
+          { "name": "SuperAdmin",         "composite": false },
+          { "name": "Director",           "composite": false },
+          { "name": "SDM",                "composite": false },
+          { "name": "TeamLead",           "composite": false },
+          { "name": "ServiceCoordinator", "composite": false },
+          { "name": "SupportEngineer",    "composite": false },
+          { "name": "HelpdeskAgent",      "composite": false }
+        ]
+      }
+    }
+---
+# Source: tms/templates/configmap-tms-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tms-config
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+# Non-secret runtime configuration for the API and Web pods.
+#
+# Secrets — the database password, the JWT signing key, the blind-index key, the
+# Keycloak admin credentials — live in the Secret named by secrets.existingSecret
+# and are referenced individually by each Deployment.
+data:
+  ASPNETCORE_ENVIRONMENT: Production
+
+  # ── Single origin ───────────────────────────────────────────────
+  # Web, API and Keycloak share one hostname on different paths, so the browser
+  # never makes a cross-origin request. That removes CORS from the picture
+  # entirely and means one DNS record and one certificate.
+  #
+  #   https://HOST/        web
+  #   https://HOST/api/    API
+  #   https://HOST/auth/   Keycloak
+  #
+  # All three of the values below are enforced by fail-fast guards in the API
+  # outside Development — a blank or non-absolute value stops the pod at startup
+  # rather than failing later at sign-in. Sso__WebRedirectBaseUrl must stay a
+  # SINGLE origin; a comma-separated list fails the absolute-URL guard.
+  Cors__WebOrigin: https://tickets.example.internal
+  Sso__WebRedirectBaseUrl: https://tickets.example.internal
+  Keycloak__PublicBaseUrl: "https://tickets.example.internal/auth"
+
+  # In-cluster address the API uses to reach Keycloak directly, not via the
+  # ingress.
+  #
+  # The path prefix here is REQUIRED and must match KC_HTTP_RELATIVE_PATH on the
+  # Keycloak pod. Both are rendered from tms.keycloak.path for that reason.
+  # These calls are server-to-server and never pass through the ingress, so
+  # nothing adds the prefix for them — without it every token exchange resolves
+  # to /realms/... which Keycloak 404s, and signing in becomes impossible. The
+  # failure is invisible to the probes: Keycloak's management interface is
+  # pinned to "/" separately, so it reports healthy throughout. (TMS #1217.)
+  Keycloak__BaseUrl: "http://keycloak:8080/auth"
+  Keycloak__ClientId: tms-api
+  Keycloak__Realm: tms
+
+  # ── Tokens ──────────────────────────────────────────────────────
+  Jwt__Issuer: tms-api
+  Jwt__Audience: tms-web
+  Jwt__ExpiryMinutes: "15"
+  Jwt__RefreshTokenExpiryDays: "7"
+
+  # ── Attachments ─────────────────────────────────────────────────
+  # Anything other than the literal "S3" resolves to the local provider, which
+  # is why attachments.provider is validated at install rather than trusted.
+  Storage__Provider: Local
+  Storage__Local__BasePath: "/var/tms/attachments"
+
+  # ── Proxy trust ─────────────────────────────────────────────────
+  # Which peers may set X-Forwarded-For and X-Forwarded-Proto, so that
+  # Request.IsHttps, HSTS and Secure cookies behave correctly behind TLS
+  # termination at the ingress.
+  #
+  # Setting this REPLACES the default (all RFC1918) rather than adding to it.
+  # That is the point: on an internal deployment the end users are themselves
+  # RFC1918 hosts, so the default would let any workstation on the network spoof
+  # X-Forwarded-For and defeat per-IP rate limiting.
+  RateLimiting__TrustedProxyCidrs__0: "10.244.0.0/16"
+
+  # ── Behaviour ───────────────────────────────────────────────────
+  Tickets__NumberPrefix: "SS"
+  Regions__Default: "ZA"
+
+  # The first administrator is created through the /setup wizard on first visit.
+  # There are no seeded accounts.
+  DemoSeeder__Enabled: "false"
+
+  # Whether the API may reconcile a squashed migration history on startup.
+  #
+  # Off by default outside Development, which is the safe posture for a database
+  # holding your data: it means an upgrade whose migration history does not line
+  # up STOPS, rather than rewriting history on its own. If a release note tells
+  # you an upgrade needs it, set migrations.autoReconcileSquash=true for that
+  # upgrade and put it back afterwards.
+  Migrations__AutoReconcileSquash: "false"
+
+  # Must stay >= Import:MaxFileSizeBytes + Import:MaxArchiveBytes, and the
+  # ingress body-size cap must not be lower — a manifest CSV and its companion
+  # archive share a single multipart body, so a lower value anywhere truncates
+  # imports rather than rejecting them cleanly. Both are rendered from
+  # tms.maxRequestBodyBytes.
+  Kestrel__Limits__MaxRequestBodySize: "167772160"
+
+  # Deliberately empty. The upstream default embeds an analytics token for a
+  # domain you do not own, which would send your traffic data somewhere
+  # unexpected.
+  CloudflareAnalytics__Token: ""
+---
+# Source: tms/templates/pvc-attachments.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tms-attachments
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    # Survive `helm uninstall`.
+    #
+    # Helm deletes PVCs it created. Every file anyone has ever attached to a
+    # ticket is on this volume, and NOTHING IN THIS CHART BACKS IT UP — so an
+    # uninstall would be the only deletion, with no second copy anywhere.
+    #
+    # The cost of keeping it is an orphaned PVC after a deliberate teardown,
+    # which is visible and reversible. Removing it manually is documented in
+    # docs/UNINSTALL.md.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    # Sufficient while tms-api runs a single replica, which is the only
+    # supported configuration today. If that changes, this must become
+    # ReadWriteMany or move to object storage — a second API pod on another node
+    # cannot mount a ReadWriteOnce volume.
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: "REPLACE-ME"
+---
+# Source: tms/templates/api.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: tms-api
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-api
+spec:
+  selector:
+    app: tms-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+# Source: tms/templates/keycloak.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-keycloak
+spec:
+  selector:
+    app: tms-keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    # Health and metrics moved to their own port in Keycloak 25+. It is
+    # deliberately not exposed through the ingress.
+    - name: management
+      port: 9000
+      targetPort: 9000
+---
+# Source: tms/templates/redis.yaml
+# Redis carries the SignalR backplane and nothing else.
+#
+# It holds no data worth keeping: losing it drops in-flight real-time
+# notifications between replicas and the clients reconnect. Deliberately no
+# persistence, no Sentinel, no clustering — a highly-available Redis would add
+# more failure modes than the one it protects against.
+#
+# It is INERT today, and worth saying so plainly: the notification hub is hosted
+# ONLY by tms-api (ApiService/Program.cs MapHub), and api.replicas is pinned to
+# 1, so there is no second pod for the backplane to reach. tms-web hosts no hub.
+#
+# It is deployed and WIRED anyway, so that lifting that restriction later is a
+# value change rather than a new component introduced into a running client
+# system. "And wired" is the distinction that matters: the k3s target deploys
+# Redis and never gives the API a connection string, so scaling up would not
+# have worked there either (TMS #1759).
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-redis
+spec:
+  selector:
+    app: tms-redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+# Source: tms/templates/web.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: tms-web
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-web
+spec:
+  selector:
+    app: tms-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+# Source: tms/templates/api.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tms-api
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-api
+spec:
+  # Exactly one. Anything else is refused at install — see _validate.tpl for the
+  # five background services that have no leader election.
+  replicas: 1
+  # Recreate, not the default RollingUpdate.
+  #
+  # This is load-bearing and easy to miss. With `replicas: 1` and the DEFAULT
+  # strategy, maxSurge is 25%, which rounds UP to 1 — so a second API pod runs
+  # alongside the old one during every single update. For the whole overlap
+  # window there are two report schedulers, two mailbox pollers, two SLA
+  # monitors, two import-recovery sweeps and two concurrent EF migrations. The
+  # replica count says one; the rollout gives you two.
+  #
+  # Recreate accepts a few seconds of downtime instead. On a single-replica
+  # deployment that is not a real loss: a rolling update of one pod already ends
+  # with a restart the user sees. (TMS #1758.)
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tms-api
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: tms-0.1.0
+        app.kubernetes.io/name: tms
+        app.kubernetes.io/instance: tms
+        app.kubernetes.io/version: "0.0.0-dev"
+        app.kubernetes.io/managed-by: Helm
+        app: tms-api
+      annotations:
+        # Roll the pod when non-secret configuration changes. Without this a
+        # ConfigMap edit is applied to the volume but never read, because these
+        # values are consumed as environment variables at process start.
+        checksum/config: 546e82dfbcff02fe431390546b16ccf67a9f478e5808fb0ba175e7fdc08cf9c5
+    spec:
+      securityContext:
+        fsGroup: 1654
+        runAsGroup: 1654
+        runAsNonRoot: true
+        runAsUser: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: attachments
+          persistentVolumeClaim:
+            claimName: tms-attachments
+        
+        - name: postgres-ca
+          secret:
+            secretName: tms-db-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+      containers:
+        - name: api
+          image: ghcr.io/aimtjie/tms-api:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: tms-config
+          env:
+            # ── Database ────────────────────────────────────────────
+            # The password is injected as its own variable and referenced by
+            # $(TMS_DB_PASSWORD) in the connection string below. Kubernetes
+            # expands $(VAR) using variables declared EARLIER in this list, so
+            # the order here matters.
+            #
+            # Doing it this way means the password never passes through Helm.
+            # Helm records every rendered manifest — Secret contents included —
+            # in a Secret in this namespace, and keeps one per retained
+            # revision. A password interpolated at render time would live there
+            # for the life of the release.
+            - name: TMS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Postgres__Password
+            - name: ConnectionStrings__ticketdb
+              value: "Host=postgres.example.internal;Port=5432;Database=ticketdb;Username=tms;Password=$(TMS_DB_PASSWORD);Ssl Mode=VerifyFull;Root Certificate=/etc/postgres-tls/ca.crt"
+
+            # ── Signing and encryption ──────────────────────────────
+            - name: Jwt__Secret
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Jwt__Secret
+            # Immutable once data exists. Changing it makes every user
+            # unfindable and sign-in stops working, with no migration path.
+            - name: Encryption__BlindIndexSecret
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Encryption__BlindIndexSecret
+
+            # ── Keycloak admin ──────────────────────────────────────
+            - name: Keycloak__AdminUsername
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminUsername
+            - name: Keycloak__AdminPassword
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminPassword
+
+            # Only needed for Microsoft Entra sign-in. Absent otherwise, and the
+            # API logs that it is skipping SSO client setup rather than failing.
+            - name: Sso__Keycloak__ClientSecret
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Sso__Keycloak__ClientSecret
+                  optional: true
+            # ── SignalR backplane ───────────────────────────────────
+            # Same $(VAR) indirection as the database password.
+            - name: TMS_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Redis__Password
+            - name: ConnectionStrings__redis
+              value: "redis:6379,password=$(TMS_REDIS_PASSWORD)"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+            - name: attachments
+              mountPath: /var/tms/attachments
+            
+            - name: postgres-ca
+              mountPath: /etc/postgres-tls
+              readOnly: true
+          # startupProbe holds liveness and readiness off until boot finishes.
+          # First boot runs migrations and warms every tenant's encryption key,
+          # which on a modest node takes minutes — without this the liveness
+          # probe kills the pod mid-migration and it never converges.
+          # 40 x 15s = 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 250m
+              memory: 256Mi
+---
+# Source: tms/templates/keycloak.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tms-keycloak
+  strategy:
+    # Keycloak imports its realm at startup against a shared database.
+    # Overlapping an old and a new instance during a rollout risks both touching
+    # the schema at once, so replace rather than overlap.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: tms-0.1.0
+        app.kubernetes.io/name: tms
+        app.kubernetes.io/instance: tms
+        app.kubernetes.io/version: "0.0.0-dev"
+        app.kubernetes.io/managed-by: Helm
+        app: tms-keycloak
+      annotations:
+        # Keycloak reads the realm ONLY at startup. Without this annotation a
+        # realm change updates the ConfigMap, the mounted file changes, and
+        # nothing re-reads it — the edit appears to have been applied and has
+        # not been.
+        checksum/realm: 24fa0ffcfa55f8d957246c33876da533f52110fb0765226ab91af1a4d94c04dc
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm
+        
+        - name: postgres-ca
+          secret:
+            secretName: tms-db-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak@sha256:8d44614c74798322c4e07fbe0ecb15cfbb5879d69b484628555f58ade06f0d8c
+          imagePullPolicy: IfNotPresent
+          # `start` without --optimized: the stock image has not been built for
+          # this database configuration, so it performs the build step on first
+          # boot. That is slow, which is what the generous startupProbe is for.
+          args:
+            - start
+            # --import-realm is what actually reads the realm mounted at
+            # /opt/keycloak/data/import. WITHOUT IT Keycloak starts perfectly
+            # happily, serves /health/ready, and has no tms realm — so the API's
+            # first admin call 404s, reference-data seeding throws, and tms-api
+            # crash-loops while every other pod reports healthy. Keycloak skips
+            # the import when the realm already exists, so this is safe on every
+            # restart, not just the first. (TMS #1236.)
+            - --import-realm
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            # Served under a path on the shared hostname, so the whole system
+            # needs one DNS record and one certificate.
+            #
+            # This value and Keycloak__BaseUrl in the tms-config ConfigMap are
+            # rendered from the SAME helper. They must agree: the API's admin and
+            # token calls are server-to-server and never pass through the
+            # ingress, so nothing adds the prefix for them.
+            - name: KC_HTTP_RELATIVE_PATH
+              value: "/auth"
+            # Pin the management interface to the root explicitly. Whether it
+            # would otherwise inherit KC_HTTP_RELATIVE_PATH is version-dependent,
+            # and the probes below must not be guesswork.
+            - name: KC_HTTP_MANAGEMENT_RELATIVE_PATH
+              value: "/"
+            - name: KC_HOSTNAME
+              value: "https://tickets.example.internal/auth"
+            # TLS terminates at the ingress; Keycloak speaks plain HTTP inside
+            # the cluster and trusts the forwarded headers.
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_PROXY_HEADERS
+              value: xforwarded
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_DB
+              value: postgres
+            # Same server and same TLS posture as the API's connection string,
+            # rendered from the same values through tms.pg.jdbc — the two are
+            # written in different languages and would otherwise drift.
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://postgres.example.internal:5432/keycloakdb?sslmode=verify-full&sslrootcert=/etc/postgres-tls/ca.crt"
+            - name: KC_DB_USERNAME
+              value: "tms"
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Postgres__Password
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminUsername
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Keycloak__AdminPassword
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 9000
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+            
+            - name: postgres-ca
+              mountPath: /etc/postgres-tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          # First boot runs the build step and imports the realm, which on a
+          # modest node takes minutes. 40 x 15s = 10 minutes before liveness can
+          # fire.
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 512Mi
+---
+# Source: tms/templates/redis.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tms-redis
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: tms-0.1.0
+        app.kubernetes.io/name: tms
+        app.kubernetes.io/instance: tms
+        app.kubernetes.io/version: "0.0.0-dev"
+        app.kubernetes.io/managed-by: Helm
+        app: tms-redis
+    spec:
+      # The default eviction timeout for an unreachable node is 5 minutes. For a
+      # component that holds no state and is cheap to restart, that is 5 minutes
+      # of degraded real-time updates for no reason.
+      tolerations:
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 20
+      securityContext:
+        fsGroup: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        runAsUser: 999
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: data
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          # --save "" disables snapshotting entirely. There is nothing here worth
+          # writing to disk.
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Redis__Password
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            failureThreshold: 3
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+---
+# Source: tms/templates/web.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tms-web
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+    app: tms-web
+spec:
+  # Safe to raise, unlike the API. The web host keeps no per-instance state that
+  # matters: its DataProtection keys live in the database, and Blazor Server
+  # circuits are pinned to a pod by the cookie affinity on the sticky Ingress.
+  #
+  # It therefore keeps the default RollingUpdate strategy — a brief surge to
+  # replicas+1 during a rollout is harmless here, which is exactly what is NOT
+  # true of the API.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tms-web
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: tms-0.1.0
+        app.kubernetes.io/name: tms
+        app.kubernetes.io/instance: tms
+        app.kubernetes.io/version: "0.0.0-dev"
+        app.kubernetes.io/managed-by: Helm
+        app: tms-web
+      annotations:
+        checksum/config: 546e82dfbcff02fe431390546b16ccf67a9f478e5808fb0ba175e7fdc08cf9c5
+    spec:
+      securityContext:
+        fsGroup: 1654
+        runAsGroup: 1654
+        runAsNonRoot: true
+        runAsUser: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        
+        - name: postgres-ca
+          secret:
+            secretName: tms-db-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+      containers:
+        - name: web
+          image: ghcr.io/aimtjie/tms-web:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: tms-config
+          env:
+            # What the BROWSER is told to call. The same origin as the web app
+            # itself, because the ingress path-routes /api to the API service —
+            # so the WASM client's /bff/api-config returns a same-origin base and
+            # no cross-origin request is ever made.
+            - name: ApiService__BaseUrl
+              value: https://tickets.example.internal
+            - name: SignalR__Transport
+              value: WebSockets
+            # Server-side calls from the Blazor Server circuit to the API, over
+            # the cluster network rather than back out through the ingress.
+            - name: services__apiservice__http__0
+              value: http://tms-api
+
+            # The web host keeps its own DataProtection key ring in the same
+            # database, under a separate application name — so it needs the
+            # connection string too, not just the API.
+            - name: TMS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Postgres__Password
+            - name: ConnectionStrings__ticketdb
+              value: "Host=postgres.example.internal;Port=5432;Database=ticketdb;Username=tms;Password=$(TMS_DB_PASSWORD);Ssl Mode=VerifyFull;Root Certificate=/etc/postgres-tls/ca.crt"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+            
+            - name: postgres-ca
+              mountPath: /etc/postgres-tls
+              readOnly: true
+          # The web host waits for the API to create the DataProtection table
+          # before it can start, so its startup window is as generous as the
+          # API's. 40 x 15s = 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            failureThreshold: 12
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 250m
+              memory: 256Mi
+---
+# Source: tms/templates/ingress.yaml
+# Single-origin ingress.
+#
+# Everything lives under ONE hostname on different paths:
+#
+#   /api/    /odata/                    ->  tms-api
+#   /auth/  ->  keycloak
+#   /                                   ->  tms-web
+#
+# One DNS record, one certificate, and — because the browser only ever talks to
+# one origin — no CORS configuration to get wrong. The WASM client asks the web
+# host for its API base address and is told "same origin as you", so a
+# cross-origin request never happens.
+#
+# The alternative, a second hostname for Keycloak, costs another DNS record,
+# another name on the certificate, and brings CORS back.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tms
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 160m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - "tickets.example.internal"
+      secretName: tms-tls
+  rules:
+    - host: "tickets.example.internal"
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          - path: /odata
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          # Always rendered. _validate.tpl refuses a root relativePath, so this is
+          # always a real prefix. An earlier version guarded this block, so a
+          # relativePath of "/" produced an ingress with NO route to sign-in and
+          # nothing reported a problem.
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-web
+                port:
+                  number: 80
+---
+# Source: tms/templates/ingress.yaml
+# Sticky routes, split into their own object because they need cookie affinity
+# and the routes above must NOT have it.
+#
+# Two independent reasons this is required, not optional:
+#
+# 1. The web app uses InteractiveAutoRenderMode. The FIRST visit runs as a real
+#    Blazor Server circuit over /_blazor, and a circuit lives in one pod's
+#    memory. The Redis backplane does not make circuits portable — nothing does.
+#
+# 2. The notification hub sets AllowStatefulReconnects, which buffers
+#    per-connection state in pod memory. The backplane does not replicate that
+#    buffer either, so a reconnect landing on a different pod silently loses it.
+#
+# Affinity is deliberately absent from /api: those requests are stateless and
+# pinning them would concentrate load for no benefit. It is configured even on a
+# single-replica install, where it is inert — so that scaling up is a
+# replica-count change and not a debugging session.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tms-sticky
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/affinity-mode: persistent
+    nginx.ingress.kubernetes.io/proxy-body-size: 160m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+    nginx.ingress.kubernetes.io/session-cookie-name: tms-affinity
+    nginx.ingress.kubernetes.io/session-cookie-path: /
+    nginx.ingress.kubernetes.io/session-cookie-samesite: Lax
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - "tickets.example.internal"
+      secretName: tms-tls
+  rules:
+    - host: "tickets.example.internal"
+      http:
+        paths:
+          # SignalR notification hub — served by the API.
+          - path: /hubs
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-api
+                port:
+                  number: 80
+          # Blazor Server circuit — served by the web host.
+          - path: /_blazor
+            pathType: Prefix
+            backend:
+              service:
+                name: tms-web
+                port:
+                  number: 80
+---
+# Source: tms/templates/job-preflight.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tms-preflight
+  labels:
+    helm.sh/chart: tms-0.1.0
+    app.kubernetes.io/name: tms
+    app.kubernetes.io/instance: tms
+    app.kubernetes.io/version: "0.0.0-dev"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    # Runs BEFORE anything else is created or updated, and blocks the release if
+    # it fails.
+    #
+    # Without it, a wrong database detail presents as the API, Web and Keycloak
+    # pods all crash-looping at once, with the real cause several hundred lines
+    # into whichever log you happen to open first. Every check below maps to a
+    # specific thing an operator gets wrong on a first install.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    # Kept on failure so the logs can be read; removed once it passes.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: tms-0.1.0
+        app.kubernetes.io/name: tms
+        app.kubernetes.io/instance: tms
+        app.kubernetes.io/version: "0.0.0-dev"
+        app.kubernetes.io/managed-by: Helm
+        app: tms-preflight
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 26
+        runAsGroup: 26
+        runAsNonRoot: true
+        runAsUser: 26
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        
+        - name: postgres-ca
+          secret:
+            secretName: tms-db-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      containers:
+        - name: preflight
+          image: ghcr.io/cloudnative-pg/postgresql:17.6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: PGHOST
+              value: "postgres.example.internal"
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: "tms"
+            - name: PGSSLMODE
+              value: "verify-full"
+            - name: PGSSLROOTCERT
+              value: /etc/postgres-tls/ca.crt
+            - name: PGCONNECT_TIMEOUT
+              value: "10"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tms-secrets
+                  key: Postgres__Password
+            - name: TMS_APP_DB
+              value: "ticketdb"
+            - name: TMS_KC_DB
+              value: "keycloakdb"
+            - name: TMS_KC_USER
+              value: "tms"
+          volumeMounts:
+            
+            - name: postgres-ca
+              mountPath: /etc/postgres-tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              fail() {
+                  echo ''
+                  echo "PREFLIGHT FAILED: $1"
+                  echo ''
+                  echo "$2"
+                  echo ''
+                  exit 1
+              }
+
+              echo "Checking ${PGHOST}:${PGPORT} as ${PGUSER} (sslmode=${PGSSLMODE})"
+
+              # 1. Reachable at all. Separates "wrong hostname" and "blocked by a
+              #    NetworkPolicy" from "wrong password", which look identical
+              #    once you are only reading application logs.
+              #    Deliberately probed with sslmode=prefer rather than the configured
+              #    mode. pg_isready honours PGSSLMODE, so under `require` against a
+              #    server with TLS switched off it fails - and attributing THAT to
+              #    reachability sends an operator hunting for NetworkPolicies and DNS
+              #    when the actual fix is one line of postgresql.conf. Caught on a real
+              #    cluster; the two are now reported separately because they have
+              #    nothing to do with each other.
+              if ! PGSSLMODE=prefer pg_isready -q -t 10; then
+                  fail "cannot reach PostgreSQL at ${PGHOST}:${PGPORT}" \
+              "Check, in this order:
+                * the hostname resolves from inside this cluster
+                * the port is correct and the server is listening on it
+                * no NetworkPolicy in this namespace blocks egress to it — a
+                  default-deny policy is the single most common cause, and it is
+                  invisible from the database's side"
+              fi
+              echo "  reachable"
+
+              # 2. TLS available. Asked separately now that we know the port answers,
+              #    so a failure here can only be about TLS.
+              case "$PGSSLMODE" in
+                  disable|prefer|allow) ;;
+                  *)
+                      if ! pg_isready -q -t 10; then
+                          fail "${PGHOST}:${PGPORT} is reachable but refused a TLS connection" \
+              "postgres.sslMode is '${PGSSLMODE}', and the server answered on the port but would
+              not negotiate TLS. That is a server-side setting, not a network problem:
+
+                * check ssl = on in postgresql.conf, and that the server can read its
+                  certificate and key
+                * check pg_hba.conf offers a hostssl line matching this client
+
+              Or, if this database is genuinely not meant to use TLS, say so explicitly
+              with postgres.sslMode=disable rather than leaving a setting that claims a
+              protection you do not have."
+                      fi
+                      echo "  TLS accepted (${PGSSLMODE})"
+                      ;;
+              esac
+
+              # 3. The application database, with the application role.
+              if ! psql -d "$TMS_APP_DB" -tAc 'SELECT 1' >/dev/null 2>/tmp/err; then
+                  fail "cannot connect to database '${TMS_APP_DB}' as '${PGUSER}'" \
+              "$(cat /tmp/err)
+
+              Expected setup:
+                CREATE ROLE ${PGUSER} LOGIN PASSWORD '...';
+                CREATE DATABASE ${TMS_APP_DB} OWNER ${PGUSER};"
+              fi
+              echo "  ${TMS_APP_DB} reachable as ${PGUSER}"
+
+              # 4. Keycloak's database. A separate database on the same server,
+              #    and the check most often missed — Keycloak is the component
+              #    that fails, so nobody looks at the database list.
+              TMS_KC_REPORTED_USER=$PGUSER
+              if [ -n "${TMS_KC_PASSWORD:-}" ]; then
+                  TMS_KC_REPORTED_USER=$TMS_KC_USER
+                  PGPASSWORD="$TMS_KC_PASSWORD" psql -U "$TMS_KC_USER" -d "$TMS_KC_DB" -tAc 'SELECT 1' \
+                      >/dev/null 2>/tmp/err \
+                      || fail "cannot connect to database '${TMS_KC_DB}' as '${TMS_KC_USER}'" \
+              "$(cat /tmp/err)
+
+              Keycloak is configured with its own role. Expected setup:
+                CREATE ROLE ${TMS_KC_USER} LOGIN PASSWORD '...';
+                CREATE DATABASE ${TMS_KC_DB} OWNER ${TMS_KC_USER};"
+              else
+                  psql -d "$TMS_KC_DB" -tAc 'SELECT 1' >/dev/null 2>/tmp/err \
+                      || fail "cannot connect to database '${TMS_KC_DB}' as '${PGUSER}'" \
+              "$(cat /tmp/err)
+
+              Keycloak keeps its own schema in its own database on the same
+              server, and shares this role. Expected setup:
+                CREATE DATABASE ${TMS_KC_DB} OWNER ${PGUSER};
+
+              If your policy requires a separate role for the identity store,
+              set postgres.keycloak.username and postgres.keycloak.existingSecret
+              instead."
+              fi
+              echo "  ${TMS_KC_DB} reachable as ${TMS_KC_REPORTED_USER}"
+
+              # 5. TLS actually negotiated.
+              #
+              #    Asked of the SERVER rather than inferred from the client
+              #    setting, because 'require' asks for encryption without
+              #    verifying anything and a misconfigured server can still leave
+              #    you unencrypted. Reading pg_stat_ssl for our own backend is
+              #    the only answer that is not a guess.
+              if [ "$PGSSLMODE" != "disable" ]; then
+                  ssl=$(psql -d "$TMS_APP_DB" -tAc \
+                      'SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()' 2>/dev/null || echo '?')
+                  if [ "$ssl" != "t" ]; then
+                      fail "connected to '${TMS_APP_DB}' WITHOUT TLS, but postgres.sslMode is '${PGSSLMODE}'" \
+              "The server reported ssl='${ssl}' for this connection.
+
+              Either the server is not configured for TLS, or its pg_hba.conf is
+              matching a non-SSL rule for this client. Fix the server, or set
+              postgres.sslMode=disable to state plainly that this deployment
+              talks to its database in clear text."
+                  fi
+                  echo "  TLS negotiated (${PGSSLMODE})"
+              else
+                  echo "  TLS not requested (sslMode=disable)"
+              fi
+
+              echo ''
+              echo 'Preflight passed.'
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi

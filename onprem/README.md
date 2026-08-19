@@ -15,11 +15,12 @@ carries over to the others.
 |---|---|---|---|---|
 | **Use when** | You have 1–3 dedicated Linux servers and want us to install everything | You already run Kubernetes and want TMS on it | You have one server and want the simplest thing that works | You already run Docker Swarm |
 | **Servers** | 1 (demo) or 3 (HA) | your cluster | 1 | 1 |
-| **Survives a server dying** | **Yes, with 3 servers** — including automatic database failover | Depends on your cluster | No | No |
-| **Database failover** | **Automatic** (CloudNativePG) | Automatic (CloudNativePG) | None — restore from backup | None — restore from backup |
-| **Zero-downtime updates** | Yes | Yes | No (brief restart) | Yes |
-| **What you must provide** | Servers, a DNS name, a TLS certificate, an off-box backup location | A cluster, a StorageClass, an ingress class, plus the above | A server, an off-box backup location | A server, an off-box backup location |
-| **Skill needed to operate** | Basic Linux (`tmsctl` wraps the rest) | Basic Linux + your existing cluster knowledge | Basic Linux | Basic Linux + Docker Swarm |
+| **Survives a server dying** | **Yes, with 3 servers** — including automatic database failover | Depends on your cluster; the API is rescheduled rather than redundant | No | No |
+| **Database failover** | **Automatic** (CloudNativePG) | **Whatever your own database does** — this target installs none | None — restore from backup | None — restore from backup |
+| **Zero-downtime updates** | Yes | Web yes; the API restarts briefly | No (brief restart) | Yes |
+| **What you must provide** | Servers, a DNS name, a TLS certificate, an off-box backup location | A cluster, **a PostgreSQL server**, a StorageClass, an ingress class, a DNS name and a TLS certificate | A server, an off-box backup location | A server, an off-box backup location |
+| **Skill needed to operate** | Basic Linux (`tmsctl` wraps the rest) | Your existing Kubernetes and PostgreSQL practice | Basic Linux | Basic Linux + Docker Swarm |
+| **Configured by** | `.env` + `tmsctl` | **Helm values** — see [`k8s/README.md`](k8s/README.md) | `.env` | `.env` |
 
 **Most people who were handed servers want `k3s/`.** It is the only target that keeps
 serving when a whole machine dies, because it is the only one that can run
