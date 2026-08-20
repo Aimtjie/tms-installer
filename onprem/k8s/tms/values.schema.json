@@ -122,7 +122,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Must be \"local\". Refused in _validate.tpl rather than here, for the same reason as api.replicas: the explanation matters more than the check, and a schema `const` would hide it."
+          "description": "\"local\" or \"postgres\". Refused in _validate.tpl rather than here, for the same reason as api.replicas: the explanation matters more than the check, and a schema `enum` would hide what each provider actually does."
         },
         "path": { "type": "string", "pattern": "^/.*" }
       }

@@ -128,19 +128,24 @@ read-only and includes it in the same restic snapshot as the database dump, so o
 back both. The volume does live on a single server, which is why a 3-server install needs storage
 every server can reach — see `k3s/README.md`.
 
-**`s3` and `postgres` are refused rather than accepted** because the application treats any
-unrecognised provider as `local`. A value accepted here but not wired into the deployment would put
-attachments somewhere the operator did not choose, and it would surface at a restore rather than at
-install.
+**`s3` and `postgres` are refused rather than accepted** because these k3s manifests do not wire
+them up. The installer checks before you get a half-configured install, rather than after. On the
+`k8s` chart target `postgres` **is** supported — set `attachments.provider` in the chart's values.
 
 Maps to `Storage:Provider`, `Storage:Local:BasePath` and `Storage:S3:*`.
 
-> **Why unrecognised values are rejected rather than ignored.** The application
-> treats any provider name it does not recognise as `local`. If a typo — or a
-> value from a newer version — were passed through, TMS would start normally and
-> quietly write attachments to a local disk, while the nightly backup covered
-> only the database. You would not find out until a restore. `./tmsctl install`
-> therefore validates this value against the list above and stops.
+> **Why unrecognised values are rejected rather than ignored.** A value this
+> target does not implement would leave TMS configured for a backend nothing had
+> deployed. `./tmsctl install` therefore validates this value against the list
+> above and stops, so the problem lands on whoever typed it rather than on
+> whoever attempts the restore months later.
+>
+> The application refuses an unrecognised `Storage:Provider` at startup too, and
+> names both the value and the valid ones in the log. It did not always: until
+> TMS 0.121 anything it did not recognise resolved silently to `local`, so a typo
+> produced a healthy-looking install writing attachments to a disk the operator
+> believed was object storage. If you are running an older build, the installer
+> check above is the only thing standing between you and that.
 
 ## Kubernetes — `k3s`
 

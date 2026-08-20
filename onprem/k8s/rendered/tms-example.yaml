@@ -15,7 +15,7 @@ kind: ConfigMap
 metadata:
   name: keycloak-realm
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -118,7 +118,7 @@ kind: ConfigMap
 metadata:
   name: tms-config
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -169,8 +169,10 @@ data:
   Jwt__RefreshTokenExpiryDays: "7"
 
   # ── Attachments ─────────────────────────────────────────────────
-  # Anything other than the literal "S3" resolves to the local provider, which
-  # is why attachments.provider is validated at install rather than trusted.
+  # Rendered from attachments.provider, which also decides whether this chart
+  # creates a volume and mounts it on the API pod. The two have to agree: a pod
+  # told to write to a path nothing is mounted at writes to its read-only root
+  # filesystem instead.
   Storage__Provider: Local
   Storage__Local__BasePath: "/var/tms/attachments"
 
@@ -220,7 +222,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: tms-attachments
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -235,6 +237,15 @@ metadata:
     # The cost of keeping it is an orphaned PVC after a deliberate teardown,
     # which is visible and reversible. Removing it manually is documented in
     # docs/UNINSTALL.md.
+    #
+    # The same annotation covers an upgrade that switches attachments.provider
+    # from `local` to `postgres`. This object then stops rendering, and Helm's
+    # rule for a resource that leaves the manifest set is to delete it — except
+    # when it carries this annotation, which makes it skip the delete. So the
+    # claim and its volume are RETAINED rather than removed: no longer tracked
+    # by the release, still holding every file, and still there if you switch
+    # back. Nothing here copies those files into the database; moving them is a
+    # migration you do deliberately.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -254,7 +265,7 @@ kind: Service
 metadata:
   name: tms-api
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -274,7 +285,7 @@ kind: Service
 metadata:
   name: keycloak
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -316,7 +327,7 @@ kind: Service
 metadata:
   name: redis
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -336,7 +347,7 @@ kind: Service
 metadata:
   name: tms-web
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -356,7 +367,7 @@ kind: Deployment
 metadata:
   name: tms-api
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -386,7 +397,7 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: tms-0.1.0
+        helm.sh/chart: tms-0.2.0
         app.kubernetes.io/name: tms
         app.kubernetes.io/instance: tms
         app.kubernetes.io/version: "0.0.0-dev"
@@ -396,7 +407,7 @@ spec:
         # Roll the pod when non-secret configuration changes. Without this a
         # ConfigMap edit is applied to the volume but never read, because these
         # values are consumed as environment variables at process start.
-        checksum/config: 546e82dfbcff02fe431390546b16ccf67a9f478e5808fb0ba175e7fdc08cf9c5
+        checksum/config: 24c7403b920443cb9a6c4137d1d7ac05e5740c08220669df62e4f71a9d542fc6
     spec:
       securityContext:
         fsGroup: 1654
@@ -413,6 +424,9 @@ spec:
         - name: home
           emptyDir:
             sizeLimit: 32Mi
+        # Only the local provider has anything to mount. Under `postgres` no
+        # claim is created, and a volume naming a claim that does not exist
+        # leaves this pod Pending instead of reporting anything.
         - name: attachments
           persistentVolumeClaim:
             claimName: tms-attachments
@@ -553,7 +567,7 @@ kind: Deployment
 metadata:
   name: keycloak
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -572,7 +586,7 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: tms-0.1.0
+        helm.sh/chart: tms-0.2.0
         app.kubernetes.io/name: tms
         app.kubernetes.io/instance: tms
         app.kubernetes.io/version: "0.0.0-dev"
@@ -583,7 +597,7 @@ spec:
         # realm change updates the ConfigMap, the mounted file changes, and
         # nothing re-reads it — the edit appears to have been applied and has
         # not been.
-        checksum/realm: 24fa0ffcfa55f8d957246c33876da533f52110fb0765226ab91af1a4d94c04dc
+        checksum/realm: 842a0c3c5ab290e65c1fcffad98d053d1e92a6c9cabb8b9ca753a090e988a6b4
     spec:
       securityContext:
         fsGroup: 1000
@@ -731,7 +745,7 @@ kind: Deployment
 metadata:
   name: redis
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -747,7 +761,7 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: tms-0.1.0
+        helm.sh/chart: tms-0.2.0
         app.kubernetes.io/name: tms
         app.kubernetes.io/instance: tms
         app.kubernetes.io/version: "0.0.0-dev"
@@ -834,7 +848,7 @@ kind: Deployment
 metadata:
   name: tms-web
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -855,14 +869,14 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: tms-0.1.0
+        helm.sh/chart: tms-0.2.0
         app.kubernetes.io/name: tms
         app.kubernetes.io/instance: tms
         app.kubernetes.io/version: "0.0.0-dev"
         app.kubernetes.io/managed-by: Helm
         app: tms-web
       annotations:
-        checksum/config: 546e82dfbcff02fe431390546b16ccf67a9f478e5808fb0ba175e7fdc08cf9c5
+        checksum/config: 24c7403b920443cb9a6c4137d1d7ac05e5740c08220669df62e4f71a9d542fc6
     spec:
       securityContext:
         fsGroup: 1654
@@ -988,7 +1002,7 @@ kind: Ingress
 metadata:
   name: tms
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -1063,7 +1077,7 @@ kind: Ingress
 metadata:
   name: tms-sticky
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -1111,7 +1125,7 @@ kind: Job
 metadata:
   name: tms-preflight
   labels:
-    helm.sh/chart: tms-0.1.0
+    helm.sh/chart: tms-0.2.0
     app.kubernetes.io/name: tms
     app.kubernetes.io/instance: tms
     app.kubernetes.io/version: "0.0.0-dev"
@@ -1133,7 +1147,7 @@ spec:
   template:
     metadata:
       labels:
-        helm.sh/chart: tms-0.1.0
+        helm.sh/chart: tms-0.2.0
         app.kubernetes.io/name: tms
         app.kubernetes.io/instance: tms
         app.kubernetes.io/version: "0.0.0-dev"

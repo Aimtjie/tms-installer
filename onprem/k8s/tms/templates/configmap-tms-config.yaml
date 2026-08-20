@@ -55,10 +55,18 @@ data:
   Jwt__RefreshTokenExpiryDays: "7"
 
   # ── Attachments ─────────────────────────────────────────────────
-  # Anything other than the literal "S3" resolves to the local provider, which
-  # is why attachments.provider is validated at install rather than trusted.
+  # Rendered from attachments.provider, which also decides whether this chart
+  # creates a volume and mounts it on the API pod. The two have to agree: a pod
+  # told to write to a path nothing is mounted at writes to its read-only root
+  # filesystem instead.
+  {{- if eq .Values.attachments.provider "postgres" }}
+  # Attachment bytes live in your PostgreSQL server, so there is no volume here
+  # and nothing separate to back up.
+  Storage__Provider: Postgres
+  {{- else }}
   Storage__Provider: Local
   Storage__Local__BasePath: {{ .Values.attachments.path | quote }}
+  {{- end }}
 
   # ── Proxy trust ─────────────────────────────────────────────────
   # Which peers may set X-Forwarded-For and X-Forwarded-Proto, so that

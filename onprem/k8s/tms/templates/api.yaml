@@ -89,9 +89,14 @@ spec:
         - name: home
           emptyDir:
             sizeLimit: 32Mi
+        {{- if eq .Values.attachments.provider "local" }}
+        # Only the local provider has anything to mount. Under `postgres` no
+        # claim is created, and a volume naming a claim that does not exist
+        # leaves this pod Pending instead of reporting anything.
         - name: attachments
           persistentVolumeClaim:
             claimName: tms-attachments
+        {{- end }}
         {{- include "tms.pg.caVolume" . | nindent 8 }}
       containers:
         - name: api
@@ -179,8 +184,10 @@ spec:
               mountPath: /tmp
             - name: home
               mountPath: /home/app
+            {{- if eq .Values.attachments.provider "local" }}
             - name: attachments
               mountPath: {{ .Values.attachments.path }}
+            {{- end }}
             {{- include "tms.pg.caVolumeMount" . | nindent 12 }}
           # startupProbe holds liveness and readiness off until boot finishes.
           # First boot runs migrations and warms every tenant's encryption key,

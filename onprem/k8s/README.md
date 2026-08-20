@@ -26,7 +26,7 @@ onprem/k8s/
 | `tms-web` | the web front end |
 | `keycloak` | sign-in. Its realm is imported on first start |
 | `redis` | carries real-time notifications between pods. Holds nothing durable |
-| `tms-attachments` | a PersistentVolumeClaim for uploaded files |
+| `tms-attachments` | a PersistentVolumeClaim for uploaded files — only when `attachments.provider` is `local`, the default. See §2 item 6 |
 | two `Ingress` objects | one hostname, path-routed. See §4 for why there are two |
 
 **Not installed, and never touched**
@@ -52,7 +52,7 @@ and the install cannot complete until all of them are.
 | 3 | **Two databases and a role** — `ticketdb` and `keycloakdb`. SQL below | Keycloak keeps its own schema; the app keeps everything else | Your DBA runs it once |
 | 4 | Whether Keycloak **shares the application's role** or gets its own | Both are supported; shared is the default | Your policy decides |
 | 5 | **TLS mode to the database** — `disable`, `require`, `verify-ca` or `verify-full` — and for the `verify-*` modes, the server's **CA certificate** | Default is `verify-full` | `SHOW ssl;` on the server, or your provider's documentation |
-| 6 | **A StorageClass** for attachments, ReadWriteOnce, ~20 GB — **and whether your platform backs it up** | ⚠ **TMS does not back up attachments. Nothing in this chart does.** A database backup restores every ticket and none of their files | `kubectl get storageclass` |
+| 6 | **A StorageClass** for attachments, ReadWriteOnce, ~20 GB — **and whether your platform backs it up** | ⚠ **TMS does not back up attachments. Nothing in this chart does.** A database backup restores every ticket and none of their files. If you have no class you would trust with the only copy, set `attachments.provider: postgres` instead: the bytes go into the database, no volume is created, and this row does not apply | `kubectl get storageclass` |
 | 7 | **The IngressClass name**, and which controller | Routing and TLS termination | `kubectl get ingressclass` |
 | 8 | Confirmation the controller supports **WebSockets**, **cookie session affinity**, **request bodies ≥ 160 MB**, and a **read timeout ≥ 3600 s** | §4 explains what breaks without each | — |
 | 9 | **The CIDR that ingress traffic reaches pods from** | §6. Getting this wrong breaks first-run setup and weakens rate limiting | `kubectl get pod -n <ingress-ns> -o wide`, matched against your pod network |

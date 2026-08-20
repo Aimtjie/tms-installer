@@ -17,12 +17,20 @@ creates the first administrator. There are no seeded accounts.
 THREE THINGS TO WRITE DOWN NOW
 ──────────────────────────────
 
+{{ if eq .Values.attachments.provider "local" -}}
 1. Attachments are NOT backed up by anything in this chart.
 
    They live on the PersistentVolumeClaim `tms-attachments`, on StorageClass
    `{{ .Values.storage.className }}`. That is the only copy. If your platform
    does not snapshot that class, arrange it — a database backup restores every
    ticket and none of their files.
+{{- else -}}
+1. Attachments are in your database, so your database backup covers them.
+
+   attachments.provider=postgres, so uploaded files are stored in PostgreSQL
+   with everything else: no volume, and nothing separate to snapshot. Their size
+   and their I/O land on that server — count them when you size it.
+{{- end }}
 
 2. Encryption__BlindIndexSecret can never change.
 

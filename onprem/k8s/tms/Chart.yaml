@@ -6,7 +6,7 @@ description: >-
 type: application
 
 # Chart version. Bumped independently of the application.
-version: 0.1.0
+version: 0.2.0
 
 # Application version. Stamped by scripts/build-onprem-release.sh at packaging
 # time; the value committed here is only meaningful for a source checkout.
@@ -37,8 +37,10 @@ keywords:
 annotations:
   # Surfaced by `helm show chart`. The first is the one that gets missed.
   tms.io/attachments-are-not-backed-up: >-
-    Attachments live on a PersistentVolumeClaim. Nothing in this chart backs
-    them up. Confirm your platform snapshots the StorageClass you choose.
+    With the default attachments.provider=local, attachments live on a
+    PersistentVolumeClaim and nothing in this chart backs them up — confirm your
+    platform snapshots the StorageClass you choose. attachments.provider=postgres
+    stores them in your database instead, where your database backup covers them.
   tms.io/api-is-single-replica: >-
     tms-api runs exactly one replica until leader election lands (TMS #1173
     Track 2). Scaling it sends duplicate report emails to customers and can

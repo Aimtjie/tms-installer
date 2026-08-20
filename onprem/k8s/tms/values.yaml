@@ -38,6 +38,10 @@ ingress:
 storage:
   # StorageClass for the attachment volume. ReadWriteOnce is sufficient.
   #
+  # Read only by the `local` attachment provider, which is the default. Under
+  # attachments.provider: postgres no volume is created and neither value here
+  # is used.
+  #
   # ⚠ NOTHING IN THIS CHART BACKS THIS UP. Uploaded files live here and in no
   #   other place. Confirm your platform snapshots this StorageClass.
   className: ""                    # e.g. ceph-rbd, nfs-client, gp3
@@ -217,12 +221,27 @@ migrations:
   autoReconcileSquash: false
 
 attachments:
-  # `local` is the only provider these manifests implement. The value is
-  # validated rather than trusted, because the application falls back to local
-  # storage for any unrecognised value rather than refusing — so a typo here
-  # would quietly write files to a disk you believe is object storage, and you
-  # would find out at restore time.
+  # Where uploaded files are kept. This value decides which manifests the chart
+  # renders, so it is checked at install rather than passed through:
+  #
+  #   local      a PersistentVolumeClaim, mounted on the API pod at the path
+  #              below, on storage.className.
+  #              ⚠ NOTHING IN THIS CHART BACKS THAT VOLUME UP.
+  #   postgres   the bytes go into your PostgreSQL server along with everything
+  #              else. No volume is created and none is mounted, so
+  #              storage.className is not needed — and whatever backs up your
+  #              database backs up the attachments with it.
+  #
+  # `postgres` is the answer on a cluster with no storage class you would trust
+  # with the only copy of a customer's files. It costs database size and
+  # database I/O instead.
+  #
+  # ⚠ CHANGING THIS ON AN EXISTING INSTALL MOVES NOTHING. Files already written
+  #   stay where they are, and the chart migrates nothing in either direction.
   provider: local
+
+  # Where the volume is mounted and where the API writes. Read only when
+  # provider is `local`.
   path: /var/tms/attachments
 
 tickets:

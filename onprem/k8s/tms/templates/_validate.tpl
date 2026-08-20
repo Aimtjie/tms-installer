@@ -37,8 +37,8 @@ Included once from configmap-tms-config.yaml, which always renders.
 {{- fail (printf "\n\ningress.controller must be \"nginx\" or \"none\" — got %q.\n\n  nginx  render the ingress-nginx annotations TMS needs\n  none   render no annotations; you supply them via ingressAnnotations and\n         ingressStickyAnnotations. Read README section 4 first — the\n         requirements behind those annotations are functional, not cosmetic.\n" .Values.ingress.controller) }}
 {{- end }}
 
-{{- if not .Values.storage.className }}
-{{- fail "\n\nstorage.className is required.\n\nAttachments are stored on a PersistentVolumeClaim. ReadWriteOnce is sufficient.\n\n    kubectl get storageclass\n\nNOTHING IN THIS CHART BACKS THIS VOLUME UP. Confirm your platform snapshots the\nclass you choose, or uploaded files exist in exactly one place.\n" }}
+{{- if and (not .Values.storage.className) (eq .Values.attachments.provider "local") }}
+{{- fail "\n\nstorage.className is required.\n\nThe `local` attachment provider stores uploads on a PersistentVolumeClaim.\nReadWriteOnce is sufficient.\n\n    kubectl get storageclass\n\nNOTHING IN THIS CHART BACKS THIS VOLUME UP. Confirm your platform snapshots the\nclass you choose, or uploaded files exist in exactly one place.\n\nIf you have no class you would trust with the only copy of a customer's files,\nput the attachments in the database you already back up instead:\n\n    --set attachments.provider=postgres\n\nNo volume is created then, and this value is not read.\n" }}
 {{- end }}
 
 {{- if not .Values.postgres.host }}
@@ -79,8 +79,8 @@ Included once from configmap-tms-config.yaml, which always renders.
 
 {{- /* ── Attachment provider ─────────────────────────────────────── */ -}}
 
-{{- if ne .Values.attachments.provider "local" }}
-{{- fail (printf "\n\nattachments.provider must be \"local\" — got %q.\n\nIt is the only provider these manifests implement. The value is checked here\nrather than passed through because the application treats any unrecognised\nprovider as local storage instead of refusing: a typo would quietly write\nuploads to a disk you believe is object storage, and you would discover it at\nrestore time.\n" .Values.attachments.provider) }}
+{{- if not (has .Values.attachments.provider (list "local" "postgres")) }}
+{{- fail (printf "\n\nattachments.provider must be \"local\" or \"postgres\" — got %q.\n\n  local      a PersistentVolumeClaim, mounted on the API pod at attachments.path\n  postgres   the bytes stored in your PostgreSQL server; no volume is created\n             and none is mounted\n\nThe value is checked here rather than passed through because these manifests\nhave to WIRE what it selects — the claim, the volume, the volumeMount and\nStorage__Provider all render from it. A provider this chart does not implement\nwould leave the API configured for storage that was never set up for it.\n" .Values.attachments.provider) }}
 {{- end }}
 
 {{- /* ── Realm ───────────────────────────────────────────────────── */ -}}
