@@ -16,9 +16,15 @@ kind: Kustomization
 #   2. Attachments must be on storage every node can reach. The default
 #      local-path StorageClass is node-local: if the node holding it dies, the
 #      volume is gone AND the API cannot start anywhere else. Set
-#      K8S_STORAGE_CLASS to a shared class (NFS/SMB) before using this overlay,
-#      or wait for the Postgres storage provider (#1190), which removes the
-#      question entirely by putting attachments in the database.
+#      K8S_STORAGE_CLASS to a shared class (NFS/SMB), or wait for the Postgres
+#      storage provider (#1190), which removes the question entirely by putting
+#      attachments in the database.
+#
+#      ⚠ K8S_STORAGE_CLASS is applied when the volume is FIRST created, and a
+#      PVC's storageClassName cannot be changed afterwards. On an install that
+#      is already running on local-path, setting it and re-running bootstrap
+#      fails step 8 on the immutable field — it does not migrate anything.
+#      Moving existing attachments to another class needs #1191.
 #
 # What Stage B DOES give you today, and it is the hard part: automatic PostgreSQL
 # failover. Lose the node holding the primary and a standby is promoted with no

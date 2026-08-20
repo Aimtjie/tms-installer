@@ -13,9 +13,10 @@
 #
 # It is deployed and WIRED anyway, so that lifting that restriction later is a
 # value change rather than a new component introduced into a running client
-# system. "And wired" is the distinction that matters: the k3s target deploys
-# Redis and never gives the API a connection string, so scaling up would not
-# have worked there either (TMS #1759).
+# system. "And wired" is the distinction that matters, and it is not automatic:
+# the k3s target deployed Redis from the day it was added without ever giving
+# the API a connection string, so scaling up would not have worked there —
+# fixed in TMS #1759, and guarded on both targets now.
 apiVersion: v1
 kind: Service
 metadata:

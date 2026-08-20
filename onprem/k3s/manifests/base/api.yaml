@@ -128,15 +128,32 @@ spec:
                   name: tms-secrets
                   key: Sso__Keycloak__ClientSecret
                   optional: true
-            # Absent on a single-server install. Without it the API logs a
-            # warning that the SignalR backplane is in-memory, which is correct
-            # and harmless when there is only one replica.
-            - name: ConnectionStrings__redis
+            # ── SignalR backplane ─────────────────────────────────────────
+            # Composed here rather than stored as its own key in tms-secrets, so
+            # the Redis password lives in exactly ONE place: rotating
+            # Redis__Password cannot leave a stale copy embedded in a second
+            # key that nothing would flag. This is the same $(VAR) indirection
+            # the Helm target uses (onprem/k8s/tms/templates/_helpers.tpl), so
+            # both on-prem targets now wire Redis identically (#1759).
+            #
+            # Deliberately NOT optional. redis.yaml reads Redis__Password the
+            # same way, so an install missing it has no Redis either — better a
+            # pod that will not start than one that silently runs without the
+            # backplane it is being charged for. That silence was the defect.
+            #
+            # ⚠ TMS_REDIS_PASSWORD MUST stay ABOVE ConnectionStrings__redis.
+            # Kubernetes expands $(VAR) only from EARLIER entries in the same
+            # container's env list, so declared after use the API would try to
+            # authenticate with the literal text "$(TMS_REDIS_PASSWORD)" —
+            # worse than the absent key this replaced, and just as quiet.
+            # Pinned by K3sApi_ReceivesARedisConnectionStringAddressedAtTheRealService.
+            - name: TMS_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: tms-secrets
-                  key: ConnectionStrings__redis
-                  optional: true
+                  key: Redis__Password
+            - name: ConnectionStrings__redis
+              value: "redis:6379,password=$(TMS_REDIS_PASSWORD)"
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -189,8 +206,8 @@ metadata:
     app: tms
 spec:
   accessModes:
-    - ReadWriteOnce
+    - __K8S_STORAGE_ACCESS_MODE__
   resources:
     requests:
       storage: 5Gi
-  storageClassName: local-path
+  storageClassName: __K8S_STORAGE_CLASS__

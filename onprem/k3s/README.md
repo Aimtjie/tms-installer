@@ -146,9 +146,16 @@ loss and nobody paged.
 
 **Attachments need storage every server can reach.** The default storage is local
 to one server, so if that server dies the files are gone *and* the API cannot start
-anywhere else. Before using Stage B, either point `K8S_STORAGE_CLASS` at shared
-storage (NFS or SMB) or wait for the option to keep attachments in the database,
-which removes the question entirely.
+anywhere else. Either point `K8S_STORAGE_CLASS` at shared storage (NFS or SMB) or
+wait for the option to keep attachments in the database, which removes the question
+entirely.
+
+> ⚠ **Set it before you install, not afterwards.** `K8S_STORAGE_CLASS` is applied
+> when the attachments volume is first created, and a volume's storage class cannot
+> be changed later. On a server already running on the default, setting it and
+> re-running the installer stops with an error rather than moving anything — it is
+> not a migration. If you are already installed and need to move the files, ask us
+> before changing anything.
 
 **The ingress runs as a single copy.** It is installed on the host's network so it
 owns ports 80 and 443 directly, which is what makes the single-hostname layout work

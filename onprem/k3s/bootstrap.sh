@@ -68,6 +68,28 @@ BS_KEY=$(require_env TLS_KEY_FILE)
 BS_PREFIX=$(env_get TICKET_NUMBER_PREFIX SS)
 BS_REGION=$(env_get REGIONS_DEFAULT ZA)
 BS_SCHEDULE=$(env_get BACKUP_SCHEDULE '0 2 * * *')
+# StorageClass for the ATTACHMENTS volume only (#1761). The PostgreSQL volumes stay on local-path
+# deliberately — CNPG replicates at the database layer onto each node's own disk, so a replicated
+# block store underneath would replicate the same bytes twice; see postgres.cluster.yaml.
+#
+# ⚠ A PVC's storageClassName is IMMUTABLE once created. This is honoured at INSTALL time; changing it
+# on a live install and re-running makes step 8's apply fail on the immutable field, which is loud and
+# recoverable but is not a migration. Moving existing attachments needs #1191.
+BS_STORAGE_CLASS=$(env_get K8S_STORAGE_CLASS local-path)
+
+# Access mode for the same volume. ReadWriteOnce is right for one server and for any
+# networked class on several (RWO means one node AT A TIME, not one node for ever, so the
+# API still moves after a failure). ReadWriteMany exists because binding is matched on the
+# EXACT mode: a pre-provisioned NFS/SMB PV that advertises only ReadWriteMany will never
+# bind a ReadWriteOnce claim, so the operator we send to shared storage needs to be able to
+# say so. Immutable after creation, exactly like the class above.
+BS_STORAGE_ACCESS=$(env_get K8S_STORAGE_ACCESS_MODE ReadWriteOnce)
+case "$BS_STORAGE_ACCESS" in
+    ReadWriteOnce|ReadWriteMany) ;;
+    *) die "K8S_STORAGE_ACCESS_MODE='$BS_STORAGE_ACCESS' is not a recognised value.
+Use ReadWriteOnce (the default, correct for one server) or ReadWriteMany (only if your
+shared storage provides it). ReadOnlyMany cannot work — attachments are uploaded." ;;
+esac
 [ -r "$BS_CERT" ] || die "Cannot read the certificate at $BS_CERT"
 [ -r "$BS_KEY" ]  || die "Cannot read the private key at $BS_KEY"
 
@@ -462,6 +484,23 @@ say '  sign-in configuration installed'
 say ''
 say "${C_BOLD}Step 8 — deploying TMS${C_OFF}"
 
+# The StorageClass has to exist before we ask it for a volume. A missing or misspelled
+# class does NOT fail the apply — Kubernetes accepts the PVC and leaves it Pending for
+# ever, the API never starts because it cannot mount its attachments, and step 9's
+# rollout wait only warns. The install would therefore finish with a green "TMS is
+# installed" banner over a system that has never worked, which is the same silent shape
+# as the two defects this change set exists to fix. Checked here rather than at step 2
+# because the cluster does not exist yet at step 2.
+k_global get storageclass "$BS_STORAGE_CLASS" >/dev/null 2>&1 || die "There is no StorageClass called '$BS_STORAGE_CLASS' in this cluster.
+
+K8S_STORAGE_CLASS in $TMS_ENV_FILE names the storage the attachments volume is created
+from. These are the classes this cluster actually has:
+
+$(k_global get storageclass -o name 2>/dev/null | sed 's|^storageclass.storage.k8s.io/|  |')
+
+Set K8S_STORAGE_CLASS to one of those and run this again, or leave it as local-path,
+which k3s installs for you. Nothing has been deployed."
+
 BS_RENDER=$(mktemp -d)
 BS_OVERLAY="$BS_ROOT/k3s/manifests/stage-$BS_STAGE"
 
@@ -474,6 +513,8 @@ BS_OVERLAY="$BS_ROOT/k3s/manifests/stage-$BS_STAGE"
           -e "s|__TICKET_NUMBER_PREFIX__|$BS_PREFIX|g" \
           -e "s|__REGIONS_DEFAULT__|$BS_REGION|g" \
           -e "s|__BACKUP_SCHEDULE__|$BS_SCHEDULE|g" \
+          -e "s|__K8S_STORAGE_CLASS__|$BS_STORAGE_CLASS|g" \
+          -e "s|__K8S_STORAGE_ACCESS_MODE__|$BS_STORAGE_ACCESS|g" \
     > "$BS_RENDER/tms.yaml"
 
 k_global apply -f "$BS_RENDER/tms.yaml" >/dev/null

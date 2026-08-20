@@ -156,7 +156,8 @@ Maps to `Storage:Provider`, `Storage:Local:BasePath` and `Storage:S3:*`.
 | Setting | Default | Notes |
 |---|---|---|
 | `K8S_NAMESPACE` | `tms` | |
-| `K8S_STORAGE_CLASS` | `local-path` | ⚠ Advertised but **not yet consumed** — `k3s` hardcodes `local-path` in its manifests regardless of what you set here. Tracked in #1761. On `k8s`, use `storage.className` in the chart's values. |
+| `K8S_STORAGE_CLASS` | `local-path` | StorageClass for the **attachments** volume only; the database stays on `local-path` regardless (CNPG replicates onto each server's own disk). ⚠ Applied at **install** time — a volume's storage class cannot be changed afterwards, so set it before installing if you plan on 3-server HA. On `k8s`, use `storage.className` in the chart's values instead. |
+| `K8S_STORAGE_ACCESS_MODE` | `ReadWriteOnce` | How the attachments volume may be mounted. `ReadWriteOnce` means one server **at a time**, not one server for ever — the API still relocates after a failure — so leave it unless your shared storage forces otherwise. Set `ReadWriteMany` only when the volume your storage admin pre-provisioned is offered *only* as `ReadWriteMany`: binding matches the mode exactly, so such a volume never satisfies a `ReadWriteOnce` request and the install stops with it unbound. Also fixed at creation. |
 | `TMS_VIP` | — | 3-server HA only. An unused IP on the **same network segment** as all three servers. |
 | `REPLICAS_API` | `3` | |
 | `REPLICAS_WEB` | `3` | |

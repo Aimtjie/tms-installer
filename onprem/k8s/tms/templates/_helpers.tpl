@@ -241,9 +241,10 @@ The floor is Import:MaxFileSizeBytes + Import:MaxArchiveBytes. Do not lower it.
 {{/*
 SignalR backplane connection string.
 
-Rendered whenever Redis is enabled. The k3s target creates the password but
-never this key, so its API silently runs an in-memory backplane on every
-install — see TMS #1759.
+Rendered whenever Redis is enabled. The k3s target composes the same string in
+its own api.yaml, using the same $(VAR) indirection, so the two targets wire
+Redis identically — it was fixed there in TMS #1759, which is where the reasoning
+for this shape is written down.
 */}}
 {{- define "tms.redis.connectionString" -}}
 redis:6379,password=$(TMS_REDIS_PASSWORD)
