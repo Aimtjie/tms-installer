@@ -14,6 +14,61 @@ onprem/k8s/
   tms/                   the chart
 ```
 
+### Which copy of this chart to install
+
+**Install from the release tarball, not from a clone of this repository.**
+
+Download the newest `tms-onprem-<version>.tar.gz` and its `.sha256` from
+<https://github.com/Aimtjie/tms-installer/releases/latest>, then:
+
+```sh
+sha256sum -c tms-onprem-<version>.tar.gz.sha256
+tar -xzf tms-onprem-<version>.tar.gz
+cd tms-onprem-<version>/k8s
+```
+
+§7 below then works as written — `./tms` is the chart in that directory, and
+`values.example.yaml` is beside it.
+
+Upgrading is a `helm upgrade` you run yourself (§7). Download a newer tarball and repeat that step
+against it; there is no update command for this target.
+
+#### If you want to use `tmsctl` here
+
+`tmsctl` is written for the bare-server target and defaults to it. On this one it needs a `.env`
+beside it saying which adapter to load and which namespace to look in — nothing else in this
+directory uses that file:
+
+```sh
+printf 'TMS_TARGET=k8s\nK8S_NAMESPACE=tms\n' > .env    # match your `helm install -n`
+```
+
+Without it `./tmsctl status` loads the bare-server adapter and fails looking for a k3s kubeconfig.
+With it, `status` and `logs` work; `update` deliberately refuses and tells you to run `helm upgrade`.
+See [`../common/CONFIG.md`](../common/CONFIG.md) § Kubernetes.
+
+#### Why not a clone
+
+The tarball's chart is pinned at packaging time: `images.api` and `images.web` carry image
+**digests**, and `Chart.yaml` carries the real `appVersion`. A clone carries `tag: latest`, an empty
+digest, and `appVersion: "0.0.0-dev"`.
+
+That difference matters on a multi-node cluster. With `pullPolicy: IfNotPresent`, a floating tag
+means each node runs whatever `latest` pointed at when *that node* first pulled — so two nodes can
+serve different builds of the API.
+
+The `appVersion` matters because it is how you tell what is running. `helm list -n tms` shows it in
+the APP VERSION column, and Helm renders it into the `app.kubernetes.io/version` label:
+
+```sh
+kubectl -n tms get deployment tms-api -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}'
+```
+
+From a clone that answers `0.0.0-dev`, on every install, for ever.
+
+A clone is a source checkout. It is the right thing for reading the chart, and fine for a lab
+install where it does not matter which build you get. It is not what you install for real.
+
 ---
 
 ## 1. What this installs, and what it does not

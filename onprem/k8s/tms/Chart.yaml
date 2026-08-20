@@ -8,8 +8,11 @@ type: application
 # Chart version. Bumped independently of the application.
 version: 0.2.0
 
-# Application version. Stamped by scripts/build-onprem-release.sh at packaging
-# time; the value committed here is only meaningful for a source checkout.
+# Application version. Stamped by scripts/build-onprem-release.sh at packaging time
+# (#1772); the value committed here is only meaningful for a source checkout. It is
+# what `helm list` shows in APP VERSION and what Helm renders into the
+# app.kubernetes.io/version label on every object — so a tarball that shipped this
+# placeholder left the running install unidentifiable by either.
 appVersion: "0.0.0-dev"
 
 # 1.27 is the floor for the resources this chart uses as written. The optional

@@ -120,8 +120,16 @@ images:
   # That is deliberate: a credential that needs renewing is a scheduled outage
   # at a site nobody can reach.
   #
-  # `digest` wins over `tag` when both are set. The release packaging pins
-  # digests here; a source checkout runs tags.
+  # `digest` wins over `tag` when both are set. scripts/build-onprem-release.sh
+  # pins the api and web digests here when it packages a release tarball (#1772),
+  # so a tarball install is reproducible and a source checkout runs tags.
+  #
+  # It pins only those two, because they are the two it is GIVEN: the workflow
+  # resolves them from the released commit and passes them in, and the script itself
+  # makes no registry calls. keycloak is digest-pinned in this file already.
+  # redis and the preflight image are not — `7.4-alpine` is a moving tag, so the
+  # multi-node divergence #1772 fixed for the app images still applies to redis.
+  # Tracked in #1793.
   api:
     repository: ghcr.io/aimtjie/tms-api
     tag: latest
