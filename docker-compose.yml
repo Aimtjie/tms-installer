@@ -132,6 +132,17 @@ services:
       Security__RequireHttps: ${REQUIRE_HTTPS:-false}
       DemoSeeder__Enabled: ${DEMO_SEEDER_ENABLED:-false}
       ASPNETCORE_URLS: http://+:8080
+
+      # DataProtection key ring (#913). Without a certificate the master keys are stored
+      # in cleartext in the database — and since the ring is the top of
+      # KEK -> per-tenant DEK -> field ciphertext, a dump decrypts every tenant offline.
+      #
+      # Defaults to OFF so an existing .env keeps working unchanged. install.sh generates
+      # a certificate for new installs and sets DATAPROTECTION_REQUIRE_CERT=true; to turn
+      # it on by hand see .env.example.
+      DataProtection__RequireCertificate: ${DATAPROTECTION_REQUIRE_CERT:-false}
+      DataProtection__Certificate__CertPath: ${DATAPROTECTION_CERT_PATH-}
+      DataProtection__Certificate__KeyPath: ${DATAPROTECTION_KEY_PATH-}
       ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
       Keycloak__BaseUrl: http://keycloak:8080
       # Public-facing Keycloak URL — rendered into per-tenant SSO setup instructions
@@ -182,6 +193,7 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${API_HTTP_PORT:-8080}:8080"
     volumes:
       - attachments_data:/data/attachments
+      - ${DATAPROTECTION_CERT_DIR:-./secrets/dataprotection}:/etc/tms-dataprotection:ro
     # /Logs is where the Serilog Development file sink writes (../Logs/ from /app).
     # tmpfs keeps it memory-backed and ephemeral — no host path needed.
     tmpfs:
@@ -220,6 +232,17 @@ services:
       # Same loopback-only forwarded-header trust as apiservice (no proxy here).
       RateLimiting__TrustedProxyCidrs__0: ${TRUSTED_PROXY_CIDR:-127.0.0.1/32}
       ASPNETCORE_URLS: http://+:8080
+
+      # DataProtection key ring (#913). Without a certificate the master keys are stored
+      # in cleartext in the database — and since the ring is the top of
+      # KEK -> per-tenant DEK -> field ciphertext, a dump decrypts every tenant offline.
+      #
+      # Defaults to OFF so an existing .env keeps working unchanged. install.sh generates
+      # a certificate for new installs and sets DATAPROTECTION_REQUIRE_CERT=true; to turn
+      # it on by hand see .env.example.
+      DataProtection__RequireCertificate: ${DATAPROTECTION_REQUIRE_CERT:-false}
+      DataProtection__Certificate__CertPath: ${DATAPROTECTION_CERT_PATH-}
+      DataProtection__Certificate__KeyPath: ${DATAPROTECTION_KEY_PATH-}
       # Same Postgres — Web only reads/writes the DataProtectionKeys table.
       ConnectionStrings__ticketdb: "Host=postgres;Port=5432;Database=ticketdb;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — set it in .env}"
       # Server-side (Blazor Server / SignalR) — pod-to-pod via the Docker network.
@@ -227,6 +250,8 @@ services:
       # Browser-facing — returned to the WASM client via /bff/api-config. Must be
       # an origin the user's browser can resolve, hence host port, not service name.
       ApiService__BaseUrl: ${API_PUBLIC_BASE_URL:-http://localhost:8080}
+    volumes:
+      - ${DATAPROTECTION_CERT_DIR:-./secrets/dataprotection}:/etc/tms-dataprotection:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEB_HTTP_PORT:-8081}:8080"
     tmpfs:

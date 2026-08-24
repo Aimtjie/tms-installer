@@ -449,6 +449,106 @@ if grep -qE '^(JWT_SECRET|BLIND_INDEX_SECRET|POSTGRES_PASSWORD|KEYCLOAK_ADMIN_PA
     die ".env still contains unset/placeholder values for required secrets after repair pass. Edit .env manually before bringing the stack up."
 fi
 
+# ── 3b. DataProtection key-ring certificate (#913) ─────────────────────────
+# Both key rings wrap their master keys with this. Without it they are persisted
+# to the DataProtectionKeys table in cleartext, and since the ring is the top of
+# KEK -> per-tenant DEK -> field ciphertext, a database dump decrypts every
+# tenant offline.
+#
+# Generated once, for NEW installs only. An existing .env with no
+# DATAPROTECTION_REQUIRE_CERT line keeps its current behaviour: docker-compose.yml
+# defaults it to false, so an upgrade never breaks a running stack. Turning it on
+# afterwards is a documented step in .env.example.
+#
+# Never regenerated once present. The key ring resolves its decryptor by
+# certificate thumbprint, so a replacement cannot unwrap what the old one wrote --
+# not even a reissue of the same private key.
+DP_DIR="$TMS_DIR/secrets/dataprotection"
+if [[ -f "$DP_DIR/tls.key" ]]; then
+    log "DataProtection certificate already present — keeping it"
+elif ! command -v openssl >/dev/null 2>&1; then
+    log "WARNING: openssl not found — skipping DataProtection certificate."
+    log "         The key ring will be stored UNENCRYPTED at rest. See .env.example."
+else
+    (
+        umask 077
+        mkdir -p "$DP_DIR"
+        openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+            -subj "/CN=dataprotection.tms" \
+            -keyout "$DP_DIR/tls.key" -out "$DP_DIR/tls.crt" >/dev/null 2>&1
+    )
+    chmod 600 "$DP_DIR/tls.key"
+    chmod 644 "$DP_DIR/tls.crt"
+
+    # The container reads these through a BIND MOUNT, which preserves host
+    # ownership -- unlike the Swarm target, where the secret carries an explicit
+    # uid/gid. Both images run as $APP_UID (1654), and the files above belong to
+    # whoever ran this script, so without the chown the app cannot traverse the
+    # directory or read its own key.
+    #
+    # Not fatal if it fails: this script is documented as runnable by a
+    # docker-group user, who cannot chown to another uid. The alternative --
+    # chmod 644 on a key that unwraps every tenant's data -- is worse than
+    # leaving the feature switched off, so that is what happens instead.
+    DP_OWNED=0
+    if chown 1654:1654 "$DP_DIR" "$DP_DIR/tls.key" "$DP_DIR/tls.crt" 2>/dev/null; then
+        DP_OWNED=1
+    elif docker run --rm -v "$DP_DIR:/dp" --entrypoint chown \
+            ghcr.io/aimtjie/tms-api:latest -R 1654:1654 /dp >/dev/null 2>&1; then
+        # The daemon runs as root even when this script does not, so a throwaway
+        # container does what the calling user cannot. Deliberately the same image
+        # the stack is about to start (matching docker-compose.yml), so this pulls
+        # nothing that the next step would not pull anyway.
+        DP_OWNED=1
+    fi
+
+    # Only claim the setting once the files actually exist AND the app can read
+    # them, so a failed openssl -- or a key the container cannot open -- cannot
+    # leave .env asserting a certificate that does not work, which would turn the
+    # next `docker compose up` into a startup failure.
+    if [[ "$DP_OWNED" != 1 ]]; then
+        log "WARNING: could not give the DataProtection certificate to uid 1654."
+        log "         Leaving it switched OFF rather than loosening the key to 644 —"
+        log "         the stack will start, with the key ring unencrypted at rest."
+        log "         To finish it, run:"
+        log "           sudo chown -R 1654:1654 $DP_DIR"
+        log "         then set DATAPROTECTION_REQUIRE_CERT=true in .env and restart."
+    elif [[ -s "$DP_DIR/tls.key" && -s "$DP_DIR/tls.crt" ]]; then
+        # `|| true` because grep exits 1 when it filters everything out, and under
+        # `set -e` that would abort mid-write leaving a stray 0600 .env.tmp and a
+        # cryptic failure. The emptiness check below is the real guard: .env always
+        # has other keys, so an empty result means something went wrong and the
+        # original must not be replaced.
+        (
+            umask 077
+            {
+                grep -vE '^DATAPROTECTION_(REQUIRE_CERT|CERT_PATH|KEY_PATH)=' .env || true
+                echo 'DATAPROTECTION_REQUIRE_CERT=true'
+                echo 'DATAPROTECTION_CERT_PATH=/etc/tms-dataprotection/tls.crt'
+                echo 'DATAPROTECTION_KEY_PATH=/etc/tms-dataprotection/tls.key'
+            } > .env.tmp
+        )
+        if [[ -s .env.tmp ]] && grep -q '^JWT_SECRET=' .env.tmp; then
+            chmod 600 .env.tmp
+            mv .env.tmp .env
+            log "Generated DataProtection certificate in secrets/dataprotection/"
+            log "  ⚠ Back up tls.key somewhere your database backups are NOT."
+            log "    Without it a restored backup is unreadable, and it can never be replaced."
+        else
+            rm -f .env.tmp
+            log "WARNING: could not rewrite .env — leaving it untouched."
+            log "         The certificate exists but is not switched on. Add these three lines"
+            log "         to .env by hand (see .env.example):"
+            log "           DATAPROTECTION_REQUIRE_CERT=true"
+            log "           DATAPROTECTION_CERT_PATH=/etc/tms-dataprotection/tls.crt"
+            log "           DATAPROTECTION_KEY_PATH=/etc/tms-dataprotection/tls.key"
+        fi
+    else
+        rm -f "$DP_DIR/tls.key" "$DP_DIR/tls.crt"
+        log "WARNING: DataProtection certificate generation failed — key ring stays unencrypted."
+    fi
+fi
+
 # ── 4. Bring the stack up ──────────────────────────────────────────────────
 # Detect external-pg mode: if PG_HOST is set to a non-empty value in .env,
 # activate the overlay that disables the bundled postgres container.
