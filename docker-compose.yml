@@ -165,9 +165,6 @@ services:
       # address) — see the TRUSTED_PROXY_CIDR notes in .env.example.
       RateLimiting__TrustedProxyCidrs__0: ${TRUSTED_PROXY_CIDR:-127.0.0.1/32}
       Migrations__AutoReconcileSquash: "true"
-      # #1821 — audit retention ships Off (destructive, irreversible). Local eval opts in so
-      # the behaviour matches the dev cluster; use "DryRun" to preview instead.
-      AuditRetention__Mode: "Live"
       # Optional: if BWS_ACCESS_TOKEN + BWS_ORGANIZATION_ID are set in .env, the
       # Bitwarden Secrets Manager provider takes precedence over the values above.
       BWS_ACCESS_TOKEN: ${BWS_ACCESS_TOKEN:-}
