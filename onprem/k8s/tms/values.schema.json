@@ -60,6 +60,31 @@
         }
       }
     },
+    "dataProtection": {
+      "type": "object",
+      "description": "Certificate wrapping the DataProtection key rings at rest. With certSecretName blank the master keys stay in cleartext in the database, so a dump decrypts every tenant offline.",
+      "properties": {
+        "certSecretName": {
+          "type": "string",
+          "description": "Secret holding a PEM certificate and its PKCS#8 private key; a kubernetes.io/tls Secret is exactly this shape. Never replace it — the key ring resolves its decryptor by certificate thumbprint, so a replacement cannot unwrap what its predecessor wrote."
+        },
+        "certSecretCertKey": { "type": "string" },
+        "certSecretKeyKey": { "type": "string" },
+        "previous": {
+          "type": ["array", "null"],
+          "description": "Superseded certificates that must stay able to unwrap old keys. Append on rotation, never remove: Tenant.EncryptedDek is read for the life of the tenant.",
+          "items": {
+            "type": "object",
+            "required": ["secretName"],
+            "properties": {
+              "secretName": { "type": "string", "minLength": 1 },
+              "certKey": { "type": "string" },
+              "keyKey": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "network": {
       "type": "object",
       "required": ["trustedProxyCidrs"],

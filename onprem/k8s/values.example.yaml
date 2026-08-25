@@ -79,3 +79,21 @@ secrets:
   # A Secret you create before installing — see README section 3.
   # This chart generates no secret material.
   existingSecret: tms-secrets
+
+# ── DataProtection key ring (#913) ──────────────────────────────────
+#
+# Wraps the master keys at rest. Leave certSecretName blank and they are stored
+# in CLEARTEXT in the database — and because the ring is the top of
+# KEK -> per-tenant DEK -> field ciphertext, a dump decrypts every tenant offline.
+#
+#   openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+#     -subj "/CN=dataprotection.tms" -keyout dp.key -out dp.crt
+#   kubectl -n tms create secret tls tms-dataprotection-cert \
+#     --cert=dp.crt --key=dp.key
+#
+# Then store dp.key with your other unrecoverable secrets and delete the local
+# copies. NEVER replace this certificate — see values.yaml for why, and rotate by
+# appending to previous[] rather than swapping it out.
+#
+# dataProtection:
+#   certSecretName: tms-dataprotection-cert

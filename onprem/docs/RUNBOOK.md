@@ -38,7 +38,7 @@ Real-time       HEALTHY    live updates flowing
 | Now | Put the certificate expiry date in a shared calendar, 30 days ahead | Nothing renews it for you. Expiry is a total outage. |
 | Now | Confirm the secrets escrow file **and** its passphrase are in your password manager | Without them a backup cannot be restored. See §8. |
 | Weekly | `tmsctl status` | Catches a stopped backup before it matters |
-| Quarterly | A practice restore (§6.5) | An untested backup is a hope, not a backup |
+| Quarterly | A practice restore (§6.6) | An untested backup is a hope, not a backup |
 
 ---
 
@@ -166,9 +166,11 @@ tmsctl logs auth | tail -50
 
 If the log mentions the database, treat it as §5 — sign-in keeps its data there.
 
-⚠️ **If this started right after restoring a backup**, stop and read §6.4. Almost
+⚠️ **If this started right after restoring a backup**, stop and read §6.5. Almost
 always it means the database was restored without its matching secrets, and there
-is a correct way to recover that does not involve trying things.
+is a correct way to recover that does not involve trying things. If ticket text is
+also coming back as gibberish, read §6.4 first — that is the DataProtection
+certificate, and it is a different missing secret with a different fix.
 
 ---
 
@@ -211,6 +213,13 @@ cannot read the data in them.
 
 **Both halves are needed to restore.** A backup without the escrow is unreadable.
 
+That is now literally true rather than a caution. Since #913 the DataProtection key
+ring inside the database dump is itself encrypted, with a certificate whose private key
+lives only in the escrow bundle — so a stolen backup is inert, and a restore without the
+escrow produces a running system whose every encrypted field is unreadable. Keep every
+superseded certificate for as long as any backup taken under it is still in retention:
+the one that was current when a backup was made is the only thing that can open it.
+
 ### 6.2 Checking backups are working
 
 ```sh
@@ -245,6 +254,21 @@ restorable, rather than merely present.
    ```
    Put those values into `.env`.
 
+   **Then restore the DataProtection certificate**, if the bundle contains
+   `DATAPROTECTION_KEY_B64`. It unwraps every tenant's encryption key, and the
+   database alone cannot be read without it:
+   ```sh
+   echo "$DATAPROTECTION_CERT_B64" | base64 -d > dp.crt
+   echo "$DATAPROTECTION_KEY_B64"  | base64 -d > dp.key
+   kubectl -n tms create secret tls tms-dataprotection-cert \
+     --cert=dp.crt --key=dp.key --dry-run=client -o yaml | kubectl apply -f -
+   rm -f dp.crt dp.key
+   ```
+   The certificate in the bundle is the one that was current when the backup was
+   taken. If you have rotated since, that certificate is still the only thing that
+   can open this backup — restore it as above and add the newer one to
+   `DataProtection__Certificate__Previous__0__*` afterwards, not the other way round.
+
 2. **Choose the backup:**
    ```sh
    tmsctl backup list
@@ -263,7 +287,28 @@ restorable, rather than merely present.
 
 5. Log in and check a ticket you recognise, including an attachment.
 
-### 6.4 Restored, but nobody can log in
+### 6.4 Restored, but ticket text and names are unreadable
+
+Fields come back as long strings of random-looking characters rather than text, and
+nothing errors. That means the DataProtection key ring could not be opened, so every
+per-tenant encryption key behind it stayed sealed.
+
+The cause is almost always a missing or wrong **DataProtection certificate** — the
+`tms-dataprotection-cert` Secret. The database carries the key ring, but since #913 it
+carries it *encrypted*, and only that certificate's private key opens it.
+
+**Fix:** restore the certificate from the escrow bundle (§ restore, step 1) and restart
+the API and Web pods. Nothing is damaged; the data has simply never been decrypted.
+
+> ⚠ Do not "fix" this by generating a fresh certificate. A new one cannot unwrap what
+> the old one wrote — the key ring matches on certificate *thumbprint*, so even a
+> reissue of the same private key fails. Generating one makes the situation permanent
+> by starting a second, unrelated key ring.
+
+**If the certificate is genuinely gone**, the encrypted fields cannot be recovered.
+This is why it is escrowed, and why it must be stored somewhere the backups are not.
+
+### 6.5 Restored, but nobody can log in
 
 This almost always means the database was restored with different secrets than it
 was created with — specifically `BLIND_INDEX_SECRET`.
@@ -279,7 +324,7 @@ and re-run the installer. Nothing is lost — the data was never damaged.
 and history are still readable, but users must be recreated. This is the single
 reason the installer refuses to finish until you confirm the escrow is stored.
 
-### 6.5 Practice restore (quarterly)
+### 6.6 Practice restore (quarterly)
 
 Do this on a spare machine, not the live one.
 

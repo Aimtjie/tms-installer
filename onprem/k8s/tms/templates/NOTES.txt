@@ -71,3 +71,26 @@ verify the server's identity. Use verify-ca or verify-full where you can.
 {{- end }}
 
 Operational procedures are in docs/RUNBOOK.md next to this chart.
+
+{{ if not .Values.dataProtection.certSecretName }}
+⚠  DataProtection key ring is NOT encrypted at rest.
+
+   The master keys that unwrap every tenant's encryption key are stored in
+   cleartext in the database, so anyone who can read a dump or a backup can
+   decrypt all of it offline.
+
+     openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+       -subj "/CN=dataprotection.{{ .Values.hostname }}" -keyout dp.key -out dp.crt
+     kubectl -n {{ .Release.Namespace }} create secret tls tms-dataprotection-cert \
+       --cert=dp.crt --key=dp.key
+     helm upgrade ... --set dataProtection.certSecretName=tms-dataprotection-cert
+
+   Keep dp.key with your unrecoverable secrets. It can never be replaced, only
+   added to — the key ring matches on certificate thumbprint, so a new one cannot
+   open what the old one wrote.
+{{- else }}
+
+✓  DataProtection key ring is wrapped by {{ .Values.dataProtection.certSecretName }}.
+   That Secret can never be deleted or replaced while any data written under it
+   still matters — rotate by appending to dataProtection.previous instead.
+{{- end }}

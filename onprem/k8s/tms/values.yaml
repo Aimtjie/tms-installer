@@ -84,6 +84,45 @@ postgres:
     existingSecret: ""             # blank ⇒ reuse the main password Secret
     existingSecretKey: password
 
+# ── DataProtection key ring (#913) ────────────────────────────────
+#
+# Both key rings ("tms" for the API, "tms-web" for Web) persist their master keys
+# to the database. Without a certificate to wrap them they are stored in
+# CLEARTEXT — and because the ring is the top of
+# KEK -> per-tenant DEK -> field ciphertext, anyone who can read a database dump
+# can decrypt every tenant's data offline.
+#
+# Supply a Secret holding a PEM certificate and its PKCS#8 private key. A
+# standard kubernetes.io/tls Secret is exactly this shape, so cert-manager output
+# works unchanged:
+#
+#   kubectl -n <ns> create secret tls tms-dataprotection-cert \
+#       --cert=dp.crt --key=dp.key
+#
+# ⚠ NEVER REPLACE THIS CERTIFICATE. The key ring resolves its decryptor by
+# certificate THUMBPRINT, so a new one cannot unwrap what the old one wrote — not
+# even a reissue of the same private key. Tenant.EncryptedDek is written once per
+# tenant and read for that tenant's lifetime, so a superseded certificate must
+# stay listed under previous[] permanently. Removing one destroys the ability to
+# read that tenant's data.
+#
+# This chart does not require cert-manager and does not renew anything. Whoever
+# issued the certificate owns keeping it available.
+dataProtection:
+  # Blank ⇒ no certificate volume is created and the key rings stay unencrypted
+  # at rest, exactly as they were before this chart supported it.
+  certSecretName: ""
+  certSecretCertKey: tls.crt
+  certSecretKeyKey: tls.key
+
+  # Certificates that no longer wrap new keys but must still open old ones. Each
+  # entry needs its own Secret, mounted at /etc/tms-dataprotection-prev-<i>.
+  # Append on rotation; never remove.
+  previous: []
+  # - secretName: tms-dataprotection-cert-2025
+  #   certKey: tls.crt
+  #   keyKey: tls.key
+
 network:
   # The CIDR that ingress traffic reaches your pods from — usually the cluster
   # pod CIDR. `kubectl get pod -n <ingress-namespace> -o wide` and match it

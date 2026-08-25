@@ -61,6 +61,12 @@ Included once from configmap-tms-config.yaml, which always renders.
 {{- fail (printf "\n\npostgres.caSecretName is set but postgres.sslMode is %q, which does not verify\nthe server's certificate.\n\nThis combination is refused rather than ignored, because the two settings say\ndifferent things about what you intend and one of them is wrong:\n\n  * to authenticate the server, raise the mode:  --set postgres.sslMode=verify-full\n  * to encrypt only, drop the CA:                --set postgres.caSecretName=\"\"\n\nNote that since Npgsql 8, \"require\" means encrypt WITHOUT checking who you are\ntalking to — it is not a weaker spelling of verify.\n" .Values.postgres.sslMode) }}
 {{- end }}
 
+{{- /* ── DataProtection key ring: refuse the half-configured cases ─ */ -}}
+
+{{- if and .Values.dataProtection.previous (not .Values.dataProtection.certSecretName) }}
+{{- fail (printf "\n\ndataProtection.previous lists %d certificate(s) but\ndataProtection.certSecretName is empty.\n\nThis combination is refused rather than ignored, because the two settings say\ndifferent things about what you intend and one of them is wrong:\n\n  * previous[] only means anything while a CURRENT certificate wraps new keys\n  * with none set, the key ring is not encrypted at rest at all, and the\n    superseded certificates would be mounted for nothing\n\nSo either name the certificate now in use:\n\n  --set dataProtection.certSecretName=tms-dataprotection-cert\n\nor drop the list:\n\n  --set dataProtection.previous=null\n\nDo NOT resolve it by deleting the superseded certificates themselves. The key\nring resolves its decryptor by certificate thumbprint, so each one is the only\nthing that can open the keys it wrote.\n" (len .Values.dataProtection.previous)) }}
+{{- end }}
+
 {{- /* ── Forwarded-header trust ──────────────────────────────────── */ -}}
 
 {{- if and (empty .Values.network.trustedProxyCidrs) (not .Values.network.trustProxyRfc1918) }}

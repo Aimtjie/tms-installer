@@ -96,7 +96,9 @@ write down what happened.
 
 **Step 4 is the one that catches the expensive mistake.** If login fails, the
 database was restored without its original `BLIND_INDEX_SECRET` — see RUNBOOK
-§6.4. Far better to discover that during a drill than during an incident.
+§6.5. If login works but ticket text comes back as gibberish, it is the
+DataProtection certificate instead — RUNBOOK §6.4. Far better to discover either
+during a drill than during an incident.
 
 The time from step 2 to step 6 is your honest recovery time. If it is longer than
 your organisation assumes, that gap is worth raising before anyone needs it.

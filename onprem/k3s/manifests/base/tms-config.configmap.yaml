@@ -90,3 +90,11 @@ data:
   # domain the client does not own, which would send their traffic data
   # somewhere unexpected.
   CloudflareAnalytics__Token: ""
+
+  # DataProtection key-ring encryption (#913). The certificate is minted once by
+  # bootstrap.sh into the tms-dataprotection-cert Secret and escrowed with the other
+  # unrecoverable secrets. Without it the master keys are stored in cleartext in the
+  # DataProtectionKeys table, so a database dump decrypts every tenant offline.
+  DataProtection__RequireCertificate: "true"
+  DataProtection__Certificate__CertPath: "/etc/tms-dataprotection/tls.crt"
+  DataProtection__Certificate__KeyPath: "/etc/tms-dataprotection/tls.key"

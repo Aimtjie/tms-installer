@@ -214,6 +214,78 @@ CloudNativePG and therefore none of the Secrets the k3s target assumes.
 {{- end }}
 {{- end -}}
 
+{{/*
+DataProtection key-ring certificate (#913).
+
+Both key rings wrap their master keys with this. Without it they are persisted to the
+DataProtectionKeys table in cleartext, and since the ring is the top of
+KEK -> per-tenant DEK -> field ciphertext, a database dump decrypts every tenant offline.
+
+Same one-definition-included-by-both shape as the CA pair above, for the same reason:
+the API and Web pods must not end up gated on different conditions. When no certificate
+is configured nothing is emitted, and the app leaves its ring exactly as it is today.
+*/}}
+{{- define "tms.dp.mountsCert" -}}
+{{- if .Values.dataProtection.certSecretName -}}true{{- end -}}
+{{- end -}}
+
+{{- define "tms.dp.certPath" -}}/etc/tms-dataprotection/tls.crt{{- end -}}
+{{- define "tms.dp.keyPath" -}}/etc/tms-dataprotection/tls.key{{- end -}}
+
+{{- define "tms.dp.certVolume" -}}
+{{- include "tms.dp.previousVolumes" . }}
+{{- if include "tms.dp.mountsCert" . }}
+- name: dataprotection-cert
+  secret:
+    secretName: {{ .Values.dataProtection.certSecretName }}
+    {{- /* 0440 not 0444: kubelet owns secret files root:fsGroup and the pods run as a
+           non-root UID with a matching fsGroup, so group read suffices. Nothing outside
+           the app process should be able to read a key-wrapping key. */}}
+    defaultMode: 0440
+    items:
+      - key: {{ .Values.dataProtection.certSecretCertKey | default "tls.crt" }}
+        path: tls.crt
+      - key: {{ .Values.dataProtection.certSecretKeyKey | default "tls.key" }}
+        path: tls.key
+{{- end }}
+{{- end -}}
+
+{{- define "tms.dp.certVolumeMount" -}}
+{{- include "tms.dp.previousVolumeMounts" . }}
+{{- if include "tms.dp.mountsCert" . }}
+- name: dataprotection-cert
+  mountPath: /etc/tms-dataprotection
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{/*
+Superseded certificates, mounted alongside so old keys stay readable. Indexed rather
+than named after the Secret so the mount path is predictable from the config key that
+points at it.
+*/}}
+{{- define "tms.dp.previousVolumes" -}}
+{{- range $i, $prev := .Values.dataProtection.previous }}
+- name: dataprotection-cert-prev-{{ $i }}
+  secret:
+    secretName: {{ $prev.secretName }}
+    defaultMode: 0440
+    items:
+      - key: {{ $prev.certKey | default "tls.crt" }}
+        path: tls.crt
+      - key: {{ $prev.keyKey | default "tls.key" }}
+        path: tls.key
+{{- end }}
+{{- end -}}
+
+{{- define "tms.dp.previousVolumeMounts" -}}
+{{- range $i, $prev := .Values.dataProtection.previous }}
+- name: dataprotection-cert-prev-{{ $i }}
+  mountPath: /etc/tms-dataprotection-prev-{{ $i }}
+  readOnly: true
+{{- end }}
+{{- end -}}
+
 {{/* ── Request body size ──────────────────────────────────────────── */}}
 
 {{/*

@@ -98,6 +98,7 @@ spec:
             claimName: tms-attachments
         {{- end }}
         {{- include "tms.pg.caVolume" . | nindent 8 }}
+        {{- with include "tms.dp.certVolume" . }}{{- . | nindent 8 }}{{- end }}
       containers:
         - name: api
           image: {{ include "tms.image" .Values.images.api }}
@@ -189,6 +190,7 @@ spec:
               mountPath: {{ .Values.attachments.path }}
             {{- end }}
             {{- include "tms.pg.caVolumeMount" . | nindent 12 }}
+            {{- with include "tms.dp.certVolumeMount" . }}{{- . | nindent 12 }}{{- end }}
           # startupProbe holds liveness and readiness off until boot finishes.
           # First boot runs migrations and warms every tenant's encryption key,
           # which on a modest node takes minutes — without this the liveness

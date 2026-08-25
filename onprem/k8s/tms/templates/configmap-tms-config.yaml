@@ -34,6 +34,20 @@ data:
   Sso__WebRedirectBaseUrl: https://{{ .Values.hostname }}
   Keycloak__PublicBaseUrl: {{ include "tms.keycloak.publicUrl" . | quote }}
 
+  {{- if include "tms.dp.mountsCert" . }}
+  # ── DataProtection key ring (#913) ──────────────────────────────
+  # Wraps the master keys at rest. Emitted only when a certificate is configured:
+  # RequireCertificate makes an absent certificate a startup failure, so setting it
+  # without the mount would crash-loop both pods rather than degrade.
+  DataProtection__RequireCertificate: "true"
+  DataProtection__Certificate__CertPath: {{ include "tms.dp.certPath" . | quote }}
+  DataProtection__Certificate__KeyPath: {{ include "tms.dp.keyPath" . | quote }}
+  {{- range $i, $prev := .Values.dataProtection.previous }}
+  DataProtection__Certificate__Previous__{{ $i }}__CertPath: "/etc/tms-dataprotection-prev-{{ $i }}/tls.crt"
+  DataProtection__Certificate__Previous__{{ $i }}__KeyPath: "/etc/tms-dataprotection-prev-{{ $i }}/tls.key"
+  {{- end }}
+  {{- end }}
+
   # In-cluster address the API uses to reach Keycloak directly, not via the
   # ingress.
   #

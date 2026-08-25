@@ -77,6 +77,21 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        # DataProtection key-ring encryption certificate (#913). Minted once by
+        # bootstrap.sh and escrowed; see onprem/docs/RUNBOOK.md. Never replace it —
+        # the ring resolves its decryptor by thumbprint, so a new certificate cannot
+        # unwrap what the old one wrote.
+        - name: dataprotection-cert
+          secret:
+            secretName: tms-dataprotection-cert
+            # 0440, not 0444: the pods run as UID 1654 with fsGroup 1654, so group
+            # read is enough and nothing else needs to see a key-wrapping key.
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
       containers:
         - name: api
           # Digest pinned by the release tarball. A tag would mean a pod restart
@@ -163,6 +178,9 @@ spec:
               mountPath: /var/tms/attachments
             - name: postgres-ca
               mountPath: /etc/postgres-tls
+              readOnly: true
+            - name: dataprotection-cert
+              mountPath: /etc/tms-dataprotection
               readOnly: true
           # startupProbe holds liveness and readiness off until boot finishes.
           # First boot runs migrations and warms every tenant's encryption key,

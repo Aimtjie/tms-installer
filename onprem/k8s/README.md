@@ -144,6 +144,38 @@ set them. Configure them in the admin UI after the first sign-in.
 
 ---
 
+## DataProtection certificate (#913)
+
+Both key rings persist their master keys to the database. Without a certificate to wrap them they
+are stored **in cleartext** — and because the ring is the top of `KEK → per-tenant DEK → field
+ciphertext`, anyone who can read a dump or a backup decrypts every tenant offline.
+
+The chart does not require cert-manager and mints nothing itself, so create the Secret once:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+  -subj "/CN=dataprotection.<your-hostname>" \
+  -keyout dp.key -out dp.crt
+
+kubectl -n <namespace> create secret tls tms-dataprotection-cert \
+  --cert=dp.crt --key=dp.key
+```
+
+Then `--set dataProtection.certSecretName=tms-dataprotection-cert`, store `dp.key` with your other
+unrecoverable secrets, and delete the local copies.
+
+> ⚠ **This certificate can never be replaced, only added to.**
+> The key ring resolves its decryptor by certificate *thumbprint*, so a new certificate cannot
+> unwrap keys the old one wrote — not even a reissue of the same private key.
+> `Tenant.EncryptedDek` is written once per tenant and read for that tenant's lifetime, so the
+> certificate has to outlive every backup taken while it was in use.
+>
+> To rotate, mount the replacement as the current one and append the outgoing certificate to
+> `dataProtection.previous[]`. Leave it there permanently. Removing an entry destroys the ability
+> to read anything encrypted while it was current.
+
+Whoever issued the certificate owns keeping it available; this chart does not renew anything.
+
 ## 3. Create the Secret
 
 **The chart generates no secret material.** You create one Secret, before installing:

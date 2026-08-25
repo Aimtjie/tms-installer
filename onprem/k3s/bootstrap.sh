@@ -333,6 +333,41 @@ else
     say '  generated'
 fi
 
+# DataProtection key-ring certificate (#913). Both key rings wrap their master keys
+# with this; without it they are persisted to the DataProtectionKeys table in
+# cleartext, and since the ring is the top of KEK -> per-tenant DEK -> field
+# ciphertext, a database dump decrypts everything offline.
+#
+# Generated once and never regenerated. The ring resolves its decryptor by
+# certificate thumbprint, so a replacement cannot unwrap what the old one wrote --
+# not even one reusing the same private key. Tenant.EncryptedDek is written once per
+# tenant and read for that tenant's lifetime, so this certificate has to outlive
+# every backup taken while it was in use.
+BS_NEW_DP_CERT=0
+if k -n "$TMS_NAMESPACE" get secret tms-dataprotection-cert >/dev/null 2>&1; then
+    say '  DataProtection certificate already present, keeping it'
+else
+    BS_DP_DIR=$(mktemp -d)
+    chmod 700 "$BS_DP_DIR"
+    openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \
+        -subj "/CN=dataprotection.$BS_HOSTNAME" \
+        -keyout "$BS_DP_DIR/tls.key" -out "$BS_DP_DIR/tls.crt" >/dev/null 2>&1 \
+        || die 'Could not generate the DataProtection certificate. Is openssl installed?'
+
+    k create secret generic tms-dataprotection-cert \
+        --from-file=tls.crt="$BS_DP_DIR/tls.crt" \
+        --from-file=tls.key="$BS_DP_DIR/tls.key" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null
+
+    # Escrowed base64-encoded: it is a multi-line PEM and the escrow bundle is
+    # KEY=value lines.
+    BS_DP_CRT_B64=$(base64 -w0 < "$BS_DP_DIR/tls.crt")
+    BS_DP_KEY_B64=$(base64 -w0 < "$BS_DP_DIR/tls.key")
+    rm -rf "$BS_DP_DIR"
+    BS_NEW_DP_CERT=1
+    say '  DataProtection certificate generated'
+fi
+
 # Backup credentials are applied on every run, not just the first, so that
 # changing the repository or its password in .env takes effect on the next
 # install without needing to know which kubectl command to run.
@@ -371,7 +406,7 @@ say '  backup credentials applied'
 # corrupted, not recoverable, just permanently opaque. So the secrets have to
 # leave this machine, and the installer refuses to finish until someone says
 # they have.
-if [ "$BS_NEW_SECRETS" = 1 ]; then
+if [ "$BS_NEW_SECRETS" = 1 ] || [ "$BS_NEW_DP_CERT" = 1 ]; then
     say ''
     say "${C_BOLD}Step 6 — saving your secrets somewhere safe${C_OFF}"
 
@@ -390,8 +425,15 @@ if [ "$BS_NEW_SECRETS" = 1 ]; then
         printf 'POSTGRES_PASSWORD=%s\n' "$BS_PGPW"
         printf 'KEYCLOAK_ADMIN_PASSWORD=%s\n' "$BS_KCPW"
         printf 'BACKUP_PASSWORD=%s\n' "$(env_get BACKUP_PASSWORD)"
+        if [ "$BS_NEW_DP_CERT" = 1 ]; then
+            printf 'DATAPROTECTION_CERT_B64=%s\n' "$BS_DP_CRT_B64"
+            printf 'DATAPROTECTION_KEY_B64=%s\n' "$BS_DP_KEY_B64"
+        fi
         printf '\nBLIND_INDEX_SECRET can never be changed. Restoring a backup\n'
         printf 'without it makes every user unfindable and login impossible.\n'
+        printf '\nDATAPROTECTION_KEY_B64 unwraps every tenant encryption key. A\n'
+        printf 'database restore without it is unreadable, and it can never be\n'
+        printf 'replaced -- only added to. Decode with: base64 -d\n'
     } | openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass "pass:$BS_PASS" \
         -out "$BS_ESCROW"
     chmod 600 "$BS_ESCROW"
